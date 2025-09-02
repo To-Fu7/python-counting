@@ -24,3 +24,8 @@ pip install torch==2.7.1+cu126 \
 ...
 python ./main.py
 ...
+
+## Debugging Mode (optional)
+
+- Set `DEBUGGING_MODE=true` in your `.env` to show an OpenCV window labeled `RGB` for live frames.
+- Press `q` to exit when the window is focused.

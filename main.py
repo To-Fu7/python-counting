@@ -86,6 +86,9 @@ DAILY_SEND_TIME = os.getenv('DAILY_SEND_TIME', '23:59')  # Format: HH:MM
 
 RTSP_URL = os.getenv('RTSP_URL')
 
+# Debugging toggle
+DEBUGGING_MODE = os.getenv('DEBUGGING_MODE', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
+
 # Line coordinates
 lineA = ast.literal_eval(os.getenv("lineA"))
 lineB = ast.literal_eval(os.getenv("lineB"))
@@ -664,6 +667,8 @@ def main():
     logging.info(f"Daily MQTT send time: {DAILY_SEND_TIME}")
     logging.info(f"Image crop settings - Padding: {CROP_PADDING}px, Min size: {MIN_CROP_SIZE}, Quality: {JPEG_QUALITY}%")
     logging.info(f"Pending data file: {pending_data_file}")
+    if DEBUGGING_MODE:
+        logging.info("Debugging mode is ENABLED: showing OpenCV window 'RGB' (press q to quit)")
     
     rtsp_url = RTSP_URL
     model = YOLO("yolo11l.pt")
@@ -852,11 +857,12 @@ def main():
                     except:
                         pass
                 
-                # Uncomment these lines if you want to display the video feed
-                # cv2.imshow("RGB", frame)
-                # if cv2.waitKey(1) & 0xFF == ord("q"):
-                #     logging.info("User requested exit")
-                #     return
+                # Optional on-screen debugging window
+                if DEBUGGING_MODE:
+                    cv2.imshow("RGB", frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        logging.info("User requested exit")
+                        return
 
                 # Handle midnight reset
                 if should_reset() and not is_midnight:
