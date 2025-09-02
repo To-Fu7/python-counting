@@ -1,0 +1,34 @@
+# DEVICE INFO
+DEVICE_ID = '' # CODE
+DEVICE_NAME = ''
+DEVICE_CODE = '' # UUID
+
+# DB CONNECTION
+PG_HOST=''
+PG_PORT=''
+PG_DB=''
+PG_USER=''
+PG_PASS=''
+
+# RTSP STREAM URL
+RTSP_URL=''
+OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|stimeout;5000000|max_delay;5000000|rw_timeout;5000000|fflags;nobuffer|flags;low_delay|reorder_queue_size;0
+
+# LINE POINT
+lineA= [(1244, 375), (885, 1038)]
+lineB= [(1249, 380), (890, 1043)]
+
+# MQTT
+MQTT_BROKER =
+MQTT_PORT = 
+MQTT_USERNAME = 
+MQTT_PASSWORD = 
+MQTT_TOPIC = '/person_in'
+MQTT_INTERVAL_TOPIC = '/resampling_person/****'
+
+# RTMP ()
+ENABLE_OUTPUT_STREAM= false
+OUTPUT_RTSP_URL=''
+OUTPUT_STREAM_FPS= 15
+# OUTPUT_STREAM_BITRATE=
+# OUTPUT_STREAM_RESOLUTION =
