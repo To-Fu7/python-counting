@@ -26,6 +26,9 @@ MQTT_PASSWORD =
 MQTT_TOPIC = '/person_in'
 MQTT_INTERVAL_TOPIC = '/resampling_person/****'
 
+# DEBUG
+DEBUGGING_MODE=false
+
 # RTMP ()
 ENABLE_OUTPUT_STREAM= false
 OUTPUT_RTSP_URL=''

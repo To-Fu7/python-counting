@@ -1,3 +1,4 @@
+
 import os
 import cv2
 import json
@@ -19,8 +20,6 @@ from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 import threading
 import ast
-from queue import Queue
-import pickle
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -55,12 +54,6 @@ last_daily_send = None
 # Store latest person coordinates for MQTT
 latest_person_coordinates = []
 
-# MQTT Queue System
-mqtt_message_queue = Queue()
-mqtt_connected = False
-pending_data_file = "pending_mqtt_data.json"
-last_sent_interval_data = None
-
 # Load environment variables
 load_dotenv()
 PG_HOST = os.getenv('PG_HOST')
@@ -86,9 +79,6 @@ DAILY_SEND_TIME = os.getenv('DAILY_SEND_TIME', '23:59')  # Format: HH:MM
 
 RTSP_URL = os.getenv('RTSP_URL')
 
-# Debugging toggle
-DEBUGGING_MODE = os.getenv('DEBUGGING_MODE', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
-
 # Line coordinates
 lineA = ast.literal_eval(os.getenv("lineA"))
 lineB = ast.literal_eval(os.getenv("lineB"))
@@ -106,94 +96,10 @@ JPEG_QUALITY = 95
 # MQTT Client
 mqtt_client = None
 
-def save_pending_data(data):
-    """Save pending data to local file"""
-    try:
-        pending_data = []
-        
-        # Load existing pending data
-        if os.path.exists(pending_data_file):
-            with open(pending_data_file, 'r') as f:
-                pending_data = json.load(f)
-        
-        # Add new data with timestamp
-        data['saved_at'] = datetime.datetime.now(local_tz).isoformat()
-        pending_data.append(data)
-        
-        # Keep only last 100 entries to prevent file from growing too large
-        if len(pending_data) > 100:
-            pending_data = pending_data[-100:]
-        
-        # Save back to file
-        with open(pending_data_file, 'w') as f:
-            json.dump(pending_data, f, indent=2)
-            
-        logging.info(f"Saved pending MQTT data to {pending_data_file}")
-        
-    except Exception as e:
-        logging.error(f"Error saving pending data: {e}")
-
-def load_and_send_pending_data():
-    """Load and send all pending data when MQTT reconnects"""
-    global mqtt_client, mqtt_connected
-    
-    if not mqtt_connected or not mqtt_client:
-        return
-    
-    try:
-        if not os.path.exists(pending_data_file):
-            return
-        
-        with open(pending_data_file, 'r') as f:
-            pending_data = json.load(f)
-        
-        if not pending_data:
-            return
-        
-        logging.info(f"Found {len(pending_data)} pending MQTT messages to send")
-        
-        sent_count = 0
-        failed_messages = []
-        
-        for data in pending_data:
-            try:
-                # Determine topic based on message type
-                topic = MQTT_INTERVAL_TOPIC if data.get('event') == 'interval_data' else MQTT_TOPIC
-                
-                # Send message
-                result = mqtt_client.publish(topic, json.dumps(data), qos=1)
-                
-                if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                    sent_count += 1
-                    logging.info(f"Sent pending message: {data.get('event', 'unknown')} - {data.get('timestamp', 'no timestamp')}")
-                    time.sleep(0.1)  # Small delay to prevent overwhelming
-                else:
-                    failed_messages.append(data)
-                    logging.error(f"Failed to send pending message, error code: {result.rc}")
-                    
-            except Exception as e:
-                logging.error(f"Error sending pending message: {e}")
-                failed_messages.append(data)
-        
-        # Update pending data file with failed messages only
-        if failed_messages:
-            with open(pending_data_file, 'w') as f:
-                json.dump(failed_messages, f, indent=2)
-            logging.warning(f"Kept {len(failed_messages)} failed messages in pending file")
-        else:
-            # All messages sent successfully, remove the file
-            os.remove(pending_data_file)
-            logging.info("All pending messages sent successfully, cleared pending file")
-        
-        if sent_count > 0:
-            logging.info(f"Successfully sent {sent_count} pending MQTT messages")
-            
-    except Exception as e:
-        logging.error(f"Error processing pending data: {e}")
 
 def init_mqtt():
     """Initialize MQTT client"""
-    global mqtt_client, mqtt_connected
+    global mqtt_client
     try:
         mqtt_client = mqtt.Client()
         
@@ -201,28 +107,16 @@ def init_mqtt():
             mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
         
         def on_connect(client, userdata, flags, rc):
-            global mqtt_connected
             if rc == 0:
-                mqtt_connected = True
                 logging.info("Connected to MQTT broker successfully")
-                # Send any pending data after successful connection
-                threading.Thread(target=load_and_send_pending_data, daemon=True).start()
             else:
-                mqtt_connected = False
                 logging.error(f"Failed to connect to MQTT broker, return code {rc}")
         
         def on_disconnect(client, userdata, rc):
-            global mqtt_connected
-            mqtt_connected = False
             logging.warning("Disconnected from MQTT broker")
         
-        def on_publish(client, userdata, mid):
-            # Optional: Track successful publishes
-            pass
-            
         mqtt_client.on_connect = on_connect
         mqtt_client.on_disconnect = on_disconnect
-        mqtt_client.on_publish = on_publish
         
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         mqtt_client.loop_start()
@@ -230,40 +124,15 @@ def init_mqtt():
     except Exception as e:
         logging.error(f"Failed to initialize MQTT: {e}")
         mqtt_client = None
-        mqtt_connected = False
-
-def send_mqtt_message(topic, payload, save_on_failure=True):
-    """Send MQTT message with fallback to local storage"""
-    global mqtt_client, mqtt_connected
-    
-    if mqtt_client is None or not mqtt_connected:
-        if save_on_failure:
-            logging.warning("MQTT not connected, saving message to pending file")
-            save_pending_data(payload)
-        else:
-            logging.warning("MQTT not connected, skipping message")
-        return False
-    
-    try:
-        result = mqtt_client.publish(topic, json.dumps(payload), qos=1)
-        
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            logging.info(f"MQTT message sent successfully to {topic}")
-            return True
-        else:
-            logging.error(f"Failed to send MQTT message, error code: {result.rc}")
-            if save_on_failure:
-                save_pending_data(payload)
-            return False
-            
-    except Exception as e:
-        logging.error(f"Error sending MQTT message: {e}")
-        if save_on_failure:
-            save_pending_data(payload)
-        return False
 
 def send_person_in_mqtt(cropped_image, record_id, event_type="person_in"):
     """Send cropped image via MQTT when person enters"""
+    global mqtt_client
+    
+    if mqtt_client is None:
+        logging.warning("MQTT client not initialized, skipping message")
+        return
+    
     try:
         # Convert cropped image to bytes with higher quality
         _, buffer = cv2.imencode('.jpg', cropped_image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -273,19 +142,23 @@ def send_person_in_mqtt(cropped_image, record_id, event_type="person_in"):
         payload = {
             "record_id": record_id,
             "device_id": device_id,
-            "device_code": device_code,
-            "device_name": device_name,
+            "device_code" : device_code,
+            "device_name" : device_name,
             "timestamp": datetime.datetime.now(local_tz).isoformat(),
             "event": event_type,
             "image": base64.b64encode(image_bytes).decode('utf-8')
         }
         
-        # Send using the new unified function
-        if send_mqtt_message(MQTT_TOPIC, payload, save_on_failure=True):
-            logging.info(f"Person {event_type.upper()} image sent via MQTT for record {record_id}")
+        # Send to MQTT
+        result = mqtt_client.publish(MQTT_TOPIC, json.dumps(payload), qos=1)
         
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            logging.info(f"Person {event_type.upper()} image sent via MQTT for record {record_id}")
+        else:
+            logging.error(f"Failed to send MQTT message, error code: {result.rc}")
+            
     except Exception as e:
-        logging.error(f"Error preparing MQTT message: {e}")
+        logging.error(f"Error sending MQTT message: {e}")
 
 def get_age_gender_data_from_db():
     """Fetch age and gender data from database"""
@@ -321,48 +194,53 @@ def get_age_gender_data_from_db():
         "age": {"kid": 0, "adult": 0, "old": 0},
         "gender": {"man": 0, "woman": 0}
     }
-
+    
 def send_interval_mqtt_data():
     """Send interval data via MQTT (every 5 minutes and at 23:59)"""
-    global last_mqtt_send, last_daily_send, interval_person_in, interval_person_out, last_sent_interval_data
+    global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
     
-    current_time = datetime.datetime.now(local_tz)
-    
-    # Create payload with current interval counts (not total)
-    payload = {
-        "record_id": record_id,
-        "device_id": device_id,
-        "device_code": device_code,
-        "device_name": device_name,
-        "timestamp": current_time.isoformat(),
-        "event": "interval_data",
-        "data": {
-            "interval_in": interval_person_in,  # Current interval count
-            "interval_out": interval_person_out,  # Current interval count
-            "total_in": person_in,  # Keep total for reference
-            "total_out": person_out,  # Keep total for reference
-            "net_count": person_in - person_out,
-            "interval_net": interval_person_in - interval_person_out,  # Net for this interval
-            "interval_minutes": MQTT_INTERVAL_MINUTES
-        }
-    }
-    
-    # Check if this is the same data as last sent (prevent duplicates)
-    if last_sent_interval_data and last_sent_interval_data == payload:
-        logging.info("Skipping duplicate interval data")
+    if mqtt_client is None:
+        logging.warning("MQTT client not initialized, skipping interval data")
         return
     
-    # Send using the new unified function
-    if send_mqtt_message(MQTT_INTERVAL_TOPIC, payload, save_on_failure=True):
-        logging.info(f"Interval data sent - Interval IN: {interval_person_in}, Interval OUT: {interval_person_out}, Total IN: {person_in}, Total OUT: {person_out}")
-        last_mqtt_send = current_time
-        last_sent_interval_data = payload.copy()  # Store for duplicate checking
+    try:
+        current_time = datetime.datetime.now(local_tz)
         
-        # Reset interval counters after successful send
-        interval_person_in = 0
-        interval_person_out = 0
-    else:
-        logging.warning("Failed to send interval data, will retry later")
+        # Create payload with current interval counts (not total)
+        payload = {
+            "record_id": record_id,
+            "device_id": device_id,
+            "device_code": device_code,
+            "device_name": device_name,
+            "timestamp": current_time.isoformat(),
+            "event": "interval_data",
+            "data": {
+                "interval_in": interval_person_in,  # Current interval count
+                "interval_out": interval_person_out,  # Current interval count
+                "total_in": person_in,  # Keep total for reference
+                "total_out": person_out,  # Keep total for reference
+                "net_count": person_in - person_out,
+                "interval_net": interval_person_in - interval_person_out,  # Net for this interval
+                "interval_minutes": MQTT_INTERVAL_MINUTES
+            }
+        }
+        
+        # Send to MQTT
+        result = mqtt_client.publish(MQTT_INTERVAL_TOPIC, json.dumps(payload), qos=1)
+        
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            logging.info(f"Interval data sent via MQTT - Interval IN: {interval_person_in}, Interval OUT: {interval_person_out}, Total IN: {person_in}, Total OUT: {person_out}")
+            last_mqtt_send = current_time
+            
+            # Reset interval counters after sending
+            interval_person_in = 0
+            interval_person_out = 0
+        else:
+            logging.error(f"Failed to send interval MQTT data, error code: {result.rc}")
+            
+    except Exception as e:
+        logging.error(f"Error sending interval MQTT data: {e}")
+
 
 def should_send_interval_mqtt():
     """Check if it's time to send interval MQTT data"""
@@ -648,6 +526,12 @@ def crop_image(frame, box, padding=None):
 
     return person_crop
 
+# def RGB(event, x, y, flags, param):
+#     """Mouse callback function for RGB window"""
+#     if event == cv2.EVENT_MOUSEMOVE:
+#         point = [x, y]
+#         print(point)
+
 def main():
     """Main function"""
     global person_in, person_out, is_midnight, record_id, latest_person_coordinates
@@ -666,9 +550,6 @@ def main():
     logging.info(f"MQTT interval: {MQTT_INTERVAL_MINUTES} minutes")
     logging.info(f"Daily MQTT send time: {DAILY_SEND_TIME}")
     logging.info(f"Image crop settings - Padding: {CROP_PADDING}px, Min size: {MIN_CROP_SIZE}, Quality: {JPEG_QUALITY}%")
-    logging.info(f"Pending data file: {pending_data_file}")
-    if DEBUGGING_MODE:
-        logging.info("Debugging mode is ENABLED: showing OpenCV window 'RGB' (press q to quit)")
     
     rtsp_url = RTSP_URL
     model = YOLO("yolo11l.pt")
@@ -688,6 +569,11 @@ def main():
                 logging.info(f'Person IN: {person_in}, Person OUT: {person_out}')
                 logging.info("RTSP stream opened successfully.")
                 logging.info(f"Device ID = {device_id}")
+            
+            
+            #get point    
+            # cv2.namedWindow('RGB')
+            # cv2.setMouseCallback('RGB', RGB)
 
             count = 0
             while True:
@@ -700,6 +586,7 @@ def main():
                     raise Exception("Frame read error or RTSP stream disconnected")
 
                 # Screen Resolution
+                # frame = cv2.resize(frame, (1280, 720))
                 frame = cv2.resize(frame, (1920, 1080))
 
                 # Create cropped frame for YOLO detection (only the detection region)
@@ -786,6 +673,7 @@ def main():
 
                                 if crossed_A:
                                     if state_in.get(track_id):
+                                        global interval_person_in
                                         person_in += 1
                                         interval_person_in += 1  # Add this line
                                         class_counts['in'] = person_in
@@ -796,6 +684,7 @@ def main():
                                             (person_in, record_id), commit=True
                                         )
                                         
+
                                         # Crop and send via MQTT
                                         send_person_in_mqtt(original_frame, record_id, "person_in")
 
@@ -808,6 +697,7 @@ def main():
                                 # When a person exits (crossed_B section):
                                 elif crossed_B: 
                                     if state_out.get(track_id):
+                                        global interval_person_out
                                         person_out += 1
                                         interval_person_out += 1  # Add this line
                                         class_counts['out'] = person_out
@@ -843,26 +733,12 @@ def main():
                 cv2.putText(frame, f'OUT: {person_out}', (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 cv2.putText(frame, f'Region Detections: {region_detections}', (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 
-                # Display MQTT connection status
-                mqtt_status = "Connected" if mqtt_connected else "Disconnected"
-                mqtt_color = (0, 255, 0) if mqtt_connected else (0, 0, 255)
-                cv2.putText(frame, f'MQTT: {mqtt_status}', (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.7, mqtt_color, 2)
                 
-                # Check if there are pending messages
-                if os.path.exists(pending_data_file):
-                    try:
-                        with open(pending_data_file, 'r') as f:
-                            pending_count = len(json.load(f))
-                        cv2.putText(frame, f'Pending: {pending_count} msgs', (50, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    except:
-                        pass
-                
-                # Optional on-screen debugging window
-                if DEBUGGING_MODE:
-                    cv2.imshow("RGB", frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        logging.info("User requested exit")
-                        return
+                #SCREEN
+                # cv2.imshow("RGB", frame)
+                # if cv2.waitKey(1) & 0xFF == ord("q"):
+                #     logging.info("User requested exit")
+                #     return
 
                 # Handle midnight reset
                 if should_reset() and not is_midnight:
