@@ -1,4 +1,6 @@
 opencv-python-headless
+torch
+torchvision
 ultralytics>=8.2.0
 numpy>=1.26.0
 lapx>=0.5.10.post1

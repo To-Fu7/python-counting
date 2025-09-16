@@ -1,21 +1,26 @@
 services:
-  services-person-traffic-1:
-    # build: # <---- IF BUILDING IMAGE
-    #   context: .
-    #   dockerfile: Dockerfile
-    image: in-out-counting-services-person-counter
-    container_name: services-traffic-counter
+  services-person-counter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: services-person-counter
     restart: unless-stopped
     env_file:
       - .env
-    ports:
-      - "8080:8080"
+    # ports:
+      # - "8080:8080"
     volumes:
       - .:/app
-    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
     shm_size: 1gb
-    command: >
-      sh -c "pip install paho-mqtt && python main.py"
+
+networks:
+  envisions:
+    driver: bridge
+
 
 
 # DUPLICATE CONTAINER

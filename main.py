@@ -593,7 +593,7 @@ def main():
                 detection_frame = frame[DETECTION_Y_MIN:DETECTION_Y_MAX, :]
                 
                 # Run YOLO only on the detection region
-                results = model.track(detection_frame, persist=True, verbose=False, device=0)
+                results = model.track(detection_frame, persist=True, verbose=False)
 
                 # IN LINE ( BLUE )
                 cv2.putText(frame, 'IN', (lineA[0][0] + 2, lineA[1][1] - 20),
