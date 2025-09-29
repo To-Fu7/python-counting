@@ -1,0 +1,57 @@
+services:
+  services-vehicle-counting:
+    build: .
+    container_name: services-vehicle-counting
+    restart: always
+    env_file: .env
+    volumes:
+      - .:/app
+    # network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  mosquitto_mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: services_mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    networks:
+      - envisions
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    restart: unless-stopped
+
+networks:
+  envisions:
+    driver: bridge
+
+
+  # USE EXISTING IMAGE
+  # services-traffic-traffic-2:
+  #   image: in-out-counting-services-person-counter
+  #   container_name: services-traffic-counter-2
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env.2
+  #   volumes:
+  #     - .:/app
+  #   runtime: nvidia
+  #   shm_size: 1gb
+
+  # services-traffic-counter-3:
+  #   image: in-out-counting-services-person-counter
+  #   container_name: services-traffic-counter-3
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env.3
+  #   volumes:
+  #     - .:/app
+  #   runtime: nvidia
+  #   shm_size: 1gb
+  

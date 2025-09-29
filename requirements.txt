@@ -1,0 +1,6 @@
+opencv-python
+ultralytics
+paho-mqtt
+psycopg2-binary
+python-dotenv
+lap>=0.5.12

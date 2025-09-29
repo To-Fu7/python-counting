@@ -1,0 +1,9 @@
+PG_HOST=host.docker.internal # on run with docker
+DEVICE_ID = ''
+PG_PORT=''
+PG_DB=''
+PG_USER=''
+PG_PASS=''
+RTSP_URL=''
+lineA= [(1244, 375), (885, 1038)] # [(RIGHT X POINT, RIGHT Y POINT), (LEFT X POINT, LEFT Y POINT)]
+lineB= [(1249, 380), (890, 1043)]
