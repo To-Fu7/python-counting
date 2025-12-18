@@ -1,4 +1,5 @@
-opencv-python-headless
+# opencv-python-headless
+# opencv-python
 torch
 torchvision
 ultralytics>=8.2.0
