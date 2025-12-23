@@ -56,7 +56,7 @@ last_daily_send = None
 latest_person_coordinates = []
 
 # Load environment variables
-load_dotenv()
+load_dotenv('.env')
 PG_HOST = os.getenv('PG_HOST')
 PG_PORT = int(os.getenv('PG_PORT', 5432))
 PG_DB = os.getenv('PG_DB')
@@ -257,6 +257,10 @@ def send_person_in_mqtt(cropped_image, record_id, event_type="person_in"):
     """Send cropped image via MQTT when person enters"""
     global mqtt_client
     
+    if DEBUG_MODE:
+        logging.info(f"DEBUG_MODE: Skipping MQTT send for {event_type}")
+        return
+    
     if mqtt_client is None:
         logging.warning("MQTT client not initialized, skipping message")
         return
@@ -326,6 +330,10 @@ def get_age_gender_data_from_db():
 def send_interval_mqtt_data():
     """Send interval data via MQTT (every 5 minutes and at 23:59)"""
     global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
+    
+    if DEBUG_MODE:
+        # logging.info("DEBUG_MODE: Skipping interval MQTT data send")
+        return
     
     if mqtt_client is None:
         logging.warning("MQTT client not initialized, skipping interval data")
@@ -418,8 +426,8 @@ def is_crossing_line(p1, p2, line):
 def initialize_video_capture(rtsp_url):
     """Initialize video capture with the given RTSP URL"""
     logging.info('Initialize video capture with the given RTSP URL.')
-    # cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    # cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FPS, 10)
     return cap
@@ -444,11 +452,15 @@ def db_get_cursor():
         return None, None
 
 # Initialize database connection
-pg_conn, cursor = db_get_cursor()
-if not cursor:
-    logging.error("Fatal: Error on Connecting DB at Start Up")
-    exit(1)
-logging.info("Successfully connected to PostgreSQL database")
+if not DEBUG_MODE:
+    pg_conn, cursor = db_get_cursor()
+    if not cursor:
+        logging.error("Fatal: Error on Connecting DB at Start Up")
+        exit(1)
+    logging.info("Successfully connected to PostgreSQL database")
+else:
+    pg_conn, cursor = None, None
+    # logging.info("DEBUG_MODE: Skipping database connection initialization")
 
 logging.info(f"RESOLUTION = {resolution[0],resolution[1]}")
 
@@ -461,6 +473,11 @@ def should_reset():
 def db_query(sql, params=(), commit=False, max_retry=3):
     """Execute database query with retry logic"""
     global pg_conn, cursor
+    
+    if DEBUG_MODE:
+        logging.info(f"DEBUG_MODE: Skipping DB query: {sql}")
+        return True
+    
     retry = 0
     while retry < max_retry:
         try:
@@ -493,6 +510,11 @@ def db_query(sql, params=(), commit=False, max_retry=3):
 def db_fetch(sql, params=(), max_retry=3):
     """Fetch data from database with retry logic"""
     global pg_conn, cursor
+    
+    if DEBUG_MODE:
+        logging.info(f"DEBUG_MODE: Skipping DB fetch: {sql}")
+        return None
+    
     retry = 0
     while retry < max_retry:
         try:
@@ -566,6 +588,17 @@ def initialize_counts():
     interval_person_in = 0
     interval_person_out = 0
     
+    if DEBUG_MODE:
+        # Skip DB validation in debug mode
+        new_id = str(uuid.uuid4())
+        record_id = new_id
+        class_counts['in'] = 0
+        class_counts['out'] = 0
+        person_in = 0
+        person_out = 0
+        logging.info(f"DEBUG_MODE: Skipping DB validation, initialized with new record id {new_id}")
+        return {"id": new_id}
+    
     # FIX: unpack four values (restored_counts, last_date_local, last_data_id, extra_data)
     restored_counts, last_date_local, last_data_id, extra_data = get_latest_counts(device_id)
 
@@ -609,15 +642,21 @@ def reset_counts():
     person_history.clear()
     
     new_id = str(uuid.uuid4())
-    success = db_query("INSERT INTO person_inout (id, device_id, total_in, total_out) VALUES (%s, %s, %s, %s)",
-                    (new_id, device_id, 0, 0), commit=True)   
-    if success:
+    
+    if DEBUG_MODE:
         record_id = new_id
-        # Reset MQTT timers
         last_mqtt_send = None
-        logging.info("== Midnight Reached: Totals Reset ==")
+        logging.info("== Midnight Reached: Totals Reset (DEBUG_MODE: Skipping DB operation) ==")
     else:
-        logging.error("Error creating new record at midnight")
+        success = db_query("INSERT INTO person_inout (id, device_id, total_in, total_out) VALUES (%s, %s, %s, %s)",
+                        (new_id, device_id, 0, 0), commit=True)   
+        if success:
+            record_id = new_id
+            # Reset MQTT timers
+            last_mqtt_send = None
+            logging.info("== Midnight Reached: Totals Reset ==")
+        else:
+            logging.error("Error creating new record at midnight")
 
 def crop_image(frame, box, padding=None):
     """Crop image around detected person with improved quality"""
@@ -674,8 +713,11 @@ def main():
     # Initialize database
     last_data_id = initialize_counts()
     if not last_data_id:
-        logging.error("Failed to initialize database")
-        return
+        if not DEBUG_MODE:
+            logging.error("Failed to initialize database")
+            return
+        else:
+            logging.info("DEBUG_MODE: Continuing without database initialization")
     
     # Log configuration
     logging.info(f"Detection region: Y from {DETECTION_Y_MIN} to {DETECTION_Y_MAX} (margin: {DETECTION_MARGIN}px)")
@@ -730,9 +772,9 @@ def main():
 
                 # Draw all IN/OUT lines
                 for lp in LINE_PAIRS:
-                    # IN LINE ( BLUE )
+                    # IN LINE ( BLUE ) (BGR)
                     cv2.line(frame, lp["in_line"][0], lp["in_line"][1], (255, 0, 0), 4)
-                    # OUT LINE ( YELLOW )
+                    # OUT LINE ( YELLOW ) (BGR)
                     cv2.line(frame, lp["out_line"][0], lp["out_line"][1], (0, 255, 255), 4)
                 
                 # Draw detection region boundaries
@@ -795,7 +837,7 @@ def main():
                             # Draw person detection
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                             cvzone.putTextRect(frame, f'{track_id}', (x1, y1), 1, 1)
-                            cv2.circle(frame, first_point, 4, (255, 0, 255), 2)
+                            cv2.circle(frame, first_point, 4, (255, 0, 0), 2)
                             cv2.circle(frame, second_point, 4, (0, 255, 255), 2)
 
                             if prev_points[0] is not None and prev_points[1] is not None:
@@ -815,10 +857,13 @@ def main():
                                             class_counts['in'] = person_in
 
                                             # Update database
-                                            db_query(
-                                                "UPDATE person_inout SET total_in = %s WHERE id = %s",
-                                                (person_in, record_id), commit=True
-                                            )
+                                            if not DEBUG_MODE:
+                                                db_query(
+                                                    "UPDATE person_inout SET total_in = %s WHERE id = %s",
+                                                    (person_in, record_id), commit=True
+                                                )
+                                            else:
+                                                logging.info("DEBUG_MODE: Skipping DB update for person_in")
 
                                             # Crop and send via MQTT
                                             send_person_in_mqtt(original_frame, record_id, "person_in")
@@ -841,10 +886,13 @@ def main():
                                             interval_person_out += 1
                                             class_counts['out'] = person_out
 
-                                            db_query(
-                                                "UPDATE person_inout SET total_out = %s WHERE id = %s",
-                                                (person_out, record_id), commit=True
-                                            )
+                                            if not DEBUG_MODE:
+                                                db_query(
+                                                    "UPDATE person_inout SET total_out = %s WHERE id = %s",
+                                                    (person_out, record_id), commit=True
+                                                )
+                                            else:
+                                                logging.info("DEBUG_MODE: Skipping DB update for person_out")
 
                                             # Crop and send via MQTT
                                             send_person_in_mqtt(original_frame, record_id, "person_out")

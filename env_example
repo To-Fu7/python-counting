@@ -3,6 +3,7 @@ DEVICE_ID = '958e0a40-05ed-414e-ac70-a54c2dcf60cf' # UUID
 DEVICE_NAME = 'x'
 DEVICE_CODE = 'x' # CODE
 
+
 # DB CONNECTION
 PG_HOST=''
 PG_PORT=''
@@ -10,8 +11,8 @@ PG_DB=''
 PG_USER=''
 PG_PASS=''
 
-# RTSP STREAM URL
-RTSP_URL='0'
+# VIDEO STREAM URL
+RTSP_URL='./test1.mp4' # RTSP URL, mp4 video path, or 0 for videocam
 OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|stimeout;5000000|max_delay;5000000|rw_timeout;5000000|fflags;nobuffer|flags;low_delay|reorder_queue_size;0
 # 800 x 600
 # 1024 x 768
@@ -22,11 +23,10 @@ SCREEN_RESOLUTION= [800, 600]
 # LINE POINT SETUP
 # "X" for point on the left and right line or "Y" for point on the up and bottom line
 POINT_AXIS= 'Y'
-OFFSET_AMOUNT= 5
 
 # INCREMENTAL LINE
-lineA= [(80, 260), (70, 530)]
-lineB= [(85, 260), (75, 530)]
+lineA= [(238, 197), (240, 540)]
+lineB= [(238, 197), (240, 540)]
 
 # lineC= [(90, 270), (80, 630)]
 # lineD= [(95, 270), (85, 630)]
