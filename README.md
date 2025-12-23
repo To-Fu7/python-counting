@@ -2,9 +2,9 @@
 
 # Setup Docker
 ## WINDOWS
-
+--
 ## LINUX
-
+--
 
 # Debug Test Python
 
@@ -13,14 +13,14 @@
 pip install -r requirements.txt
 ...
 
-- install torch cuda support
+- install torch cuda support if using cuda
 ...
 pip install torch==2.7.1+cu126 \
     torchvision==0.22.1+cu126 \
     --index-url https://download.pytorch.org/whl/cu126
 ... 
 
-- Run Code di Terminal
+- Run Code in Terminal
 ...
 python ./main.py
 ...
