@@ -423,14 +423,67 @@ def is_crossing_line(p1, p2, line):
         logging.warning(f"Error checking line crossing: {e}")
         return False
 
-def initialize_video_capture(rtsp_url):
-    """Initialize video capture with the given RTSP URL"""
-    logging.info('Initialize video capture with the given RTSP URL.')
-    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    # cap = cv2.VideoCapture(0)
+def validate_cctv_connection(rtsp_url, timeout=5):
+    """Validate CCTV connection by attempting to open and read a frame"""
+    if not rtsp_url or rtsp_url.strip() == '':
+        logging.warning("RTSP_URL is empty or not set")
+        return False
+    
+    try:
+        logging.info(f"Validating CCTV connection: {rtsp_url}")
+        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        if not cap.isOpened():
+            logging.warning("CCTV stream failed to open")
+            cap.release()
+            return False
+        
+        # Try to read a frame to verify connection
+        ret, frame = cap.read()
+        cap.release()
+        
+        if ret and frame is not None:
+            logging.info("CCTV connection validated successfully")
+            return True
+        else:
+            logging.warning("CCTV stream opened but failed to read frame")
+            return False
+            
+    except Exception as e:
+        logging.warning(f"CCTV validation error: {e}")
+        return False
+
+def initialize_video_capture(video_source):
+    """Initialize video capture with the given video source (RTSP URL or file path)"""
+    logging.info(f'Initializing video capture with source: {video_source}')
+    cap = cv2.VideoCapture(video_source, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FPS, 10)
     return cap
+
+def get_video_source():
+    """Get video source with CCTV validation and fallback to 1.mp4"""
+    fallback_video = '1.mp4'
+    
+    # Check if RTSP_URL is set
+    if not RTSP_URL or RTSP_URL.strip() == '':
+        logging.warning(f"RTSP_URL is not set or empty. Falling back to {fallback_video}")
+        return fallback_video
+    
+    # Validate CCTV connection
+    if validate_cctv_connection(RTSP_URL):
+        logging.info("Using CCTV stream as video source")
+        return RTSP_URL
+    else:
+        logging.warning(f"CCTV connection failed or disabled. Falling back to {fallback_video}")
+        # Verify fallback file exists
+        if os.path.exists(fallback_video):
+            logging.info(f"Fallback video file found: {fallback_video}")
+            return fallback_video
+        else:
+            logging.error(f"Fallback video file not found: {fallback_video}")
+            raise FileNotFoundError(f"Neither CCTV stream nor fallback video file ({fallback_video}) is available")
 
 def db_connect():
     """Create database connection"""
@@ -725,7 +778,14 @@ def main():
     logging.info(f"Daily MQTT send time: {DAILY_SEND_TIME}")
     logging.info(f"Image crop settings - Padding: {CROP_PADDING}px, Min size: {MIN_CROP_SIZE}, Quality: {JPEG_QUALITY}%")
     
-    rtsp_url = RTSP_URL
+    # Get video source with CCTV validation and fallback
+    try:
+        video_source = get_video_source()
+        logging.info(f"Video source selected: {video_source}")
+    except FileNotFoundError as e:
+        logging.error(f"Fatal error: {e}")
+        return
+    
     model = YOLO(YOLO_MODEL)
     names = model.names
 
@@ -735,13 +795,13 @@ def main():
         try:
             logging.info('Initializing Service...')
             
-            cap = initialize_video_capture(rtsp_url)
+            cap = initialize_video_capture(video_source)
             if not cap.isOpened():
-                logging.error("Failed to open RTSP stream.")
-                raise Exception("Failed to open RTSP stream")
+                logging.error(f"Failed to open video source: {video_source}")
+                raise Exception(f"Failed to open video source: {video_source}")
             else:
                 logging.info(f'Person IN: {person_in}, Person OUT: {person_out}')
-                logging.info("RTSP stream opened successfully.")
+                logging.info(f"Video source opened successfully: {video_source}")
                 logging.info(f"Device ID = {device_id}")
             
             
@@ -757,8 +817,8 @@ def main():
                 if count % 2 != 0:
                     continue
                 if not ret:
-                    logging.error("Failed to read frame from RTSP stream")
-                    raise Exception("Frame read error or RTSP stream disconnected")
+                    logging.error(f"Failed to read frame from video source: {video_source}")
+                    raise Exception(f"Frame read error or video source disconnected: {video_source}")
 
                 # Screen Resolution
                 # frame = cv2.resize(frame, (1280, 720))
@@ -779,7 +839,7 @@ def main():
                 
                 # Draw detection region boundaries
                 cv2.line(frame, (0, DETECTION_Y_MIN), (1920, DETECTION_Y_MIN), (0, 255, 0), 2)
-                cv2.line(frame, (0, DETECTION_Y_MAX), (1920, DETECTION_Y_MAX), (0, 255, 0), 2)
+                cv2.line(frame, (0, DETECTION_Y_MAX), (1920, DETECTION_Y_MAX), (0, 222, 0), 2)
                 
                 cv2.putText(frame, 'Detection Region', (10, DETECTION_Y_MIN - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
