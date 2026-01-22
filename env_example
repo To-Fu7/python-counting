@@ -1,7 +1,8 @@
 # DEVICE INFO
-DEVICE_ID = '958e0a40-05ed-414e-ac70-a54c2dcf60cf' # UUID
-DEVICE_NAME = 'x'
-DEVICE_CODE = 'x' # CODE
+# NOTE: When using MULTI_CAMERA_CONFIG, move these to config/cameras.json (per-camera settings)
+# DEVICE_ID = '958e0a40-05ed-414e-ac70-a54c2dcf60cf' # UUID - Move to JSON: "device_id"
+# DEVICE_NAME = 'x' # Move to JSON: "device_name"
+# DEVICE_CODE = 'x' # CODE - Move to JSON: "device_code"
 
 
 # DB CONNECTION
@@ -12,33 +13,44 @@ PG_USER=''
 PG_PASS=''
 
 # VIDEO STREAM URL
-RTSP_URL='./1.mp4' # RTSP URL, mp4 video path, or 0 for videocam
+# NOTE: When using MULTI_CAMERA_CONFIG, move RTSP_URL and SCREEN_RESOLUTION to config/cameras.json
+# RTSP_URL='./1.mp4' # RTSP URL, mp4 video path, or 0 for videocam - Move to JSON: "rtsp_url"
 OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|stimeout;5000000|max_delay;5000000|rw_timeout;5000000|fflags;nobuffer|flags;low_delay|reorder_queue_size;0
 # 800 x 600
 # 1024 x 768
 # 1280 x 720
 # 1920 x 1080
-SCREEN_RESOLUTION= [800, 600]
+# SCREEN_RESOLUTION= [800, 600] # Move to JSON: "screen_resolution"
 
 # LINE POINT SETUP
+# NOTE: When using MULTI_CAMERA_CONFIG, move these to config/cameras.json (per-camera settings)
 # "X" for point on the left and right line or "Y" for point on the up and bottom line
-POINT_AXIS= 'Y'
+# POINT_AXIS= 'Y' # Move to JSON: "point_axis"
+# LINE_OFFSET= 'X' # Move to JSON: "line_offset" (if used)
+# OFFSET_AMOUNT= 5 # Move to JSON: "offset_amount" (if used)
 
 # INCREMENTAL LINE
-lineA= [(240, 200), (240, 540)]
-lineB= [(245, 205), (245, 545)]
+# lineA= [(240, 200), (240, 540)] # Move to JSON: "lines": {"lineA": [[240, 200], [240, 540]]}
+# lineB= [(245, 205), (245, 545)] # Move to JSON: "lines": {"lineB": [[245, 205], [245, 545]]}
 
-# lineC= [(90, 270), (80, 630)]
-# lineD= [(95, 270), (85, 630)]
+# lineC= [(90, 270), (80, 630)] # Move to JSON: "lines": {"lineC": [[90, 270], [80, 630]]}
+# lineD= [(95, 270), (85, 630)] # Move to JSON: "lines": {"lineD": [[95, 270], [85, 630]]}
 
 
 # MQTT
+# NOTE: MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD stay in .env (shared infrastructure)
 MQTT_BROKER = 'localhost'
 MQTT_PORT = '1883'
 MQTT_USERNAME = '' 
 MQTT_PASSWORD =  ''
-MQTT_TOPIC = '/person_in'
-MQTT_INTERVAL_TOPIC = '/resampling_person/****'
+# NOTE: When using MULTI_CAMERA_CONFIG, these can be moved to config/cameras.json (optional per-camera)
+# MQTT_TOPIC = '/person_in' # Move to JSON: "mqtt_topic" (optional, can be per-camera)
+# MQTT_INTERVAL_TOPIC = '/resampling_person/****' # Move to JSON: "mqtt_interval_topic" (optional, can be per-camera)
+
+# Optional: multi-camera config (single container)
+# When set, this file lists all cameras and the service will spawn
+# one worker process per entry.
+MULTI_CAMERA_CONFIG=./config/cameras.json
 
 # DEBUG MODE
 DEBUG_MODE = 'true'

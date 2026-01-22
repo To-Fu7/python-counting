@@ -1,0 +1,38 @@
+[
+  {
+    "name": "lobby-cam",
+    "device_id": "958e0a40-05ed-414e-ac70-a54c2dcf60cf",
+    "device_code": "lobby-01",
+    "device_name": "Lobby Entrance",
+    "rtsp_url": "rtsp://username:password@192.168.1.10/stream",
+    "screen_resolution": [1280, 720],
+    "point_axis": "Y",
+    "line_offset": "X",
+    "offset_amount": 5,
+    "lines": {
+      "lineA": [[240, 200], [240, 540]],
+      "lineB": [[245, 205], [245, 545]]
+    },
+    "mqtt_topic": "/person_in/lobby",
+    "mqtt_interval_topic": "/resampling_person/lobby",
+    "yolo_model": "yolo11n.pt"
+  },
+  {
+    "name": "warehouse-cam",
+    "device_id": "c41a8de2-7a0a-4e8b-b7e2-1b5f6a2a1111",
+    "device_code": "wh-02",
+    "device_name": "Warehouse",
+    "rtsp_url": "rtsp://username:password@192.168.1.11/stream",
+    "screen_resolution": [1280, 720],
+    "point_axis": "Y",
+    "line_offset": "X",
+    "offset_amount": 5,
+    "lines": {
+      "lineA": [[200, 180], [200, 520]],
+      "lineB": [[205, 185], [205, 525]]
+    },
+    "mqtt_topic": "/person_in/warehouse",
+    "mqtt_interval_topic": "/resampling_person/warehouse",
+    "yolo_model": "yolo11n.pt"
+  }
+]

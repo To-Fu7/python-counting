@@ -21,9 +21,12 @@ import paho.mqtt.client as mqtt
 import threading
 import ast
 import string
+import subprocess
+import sys
+from pathlib import Path
 
-# Logging configuration
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Load environment variables before configuration
+load_dotenv('.env')
 
 # GLOBAL VARIABLES
 local_tz = ZoneInfo("Asia/Jakarta")
@@ -55,8 +58,6 @@ last_daily_send = None
 # Store latest person coordinates for MQTT
 latest_person_coordinates = []
 
-# Load environment variables
-load_dotenv('.env')
 PG_HOST = os.getenv('PG_HOST')
 PG_PORT = int(os.getenv('PG_PORT', 5432))
 PG_DB = os.getenv('PG_DB')
@@ -65,6 +66,22 @@ PG_PASS = os.getenv('PG_PASS')
 device_id = os.getenv('DEVICE_ID')
 device_code = os.getenv('DEVICE_CODE')
 device_name = os.getenv('DEVICE_NAME')
+
+# Logging configuration with device context
+LOG_DEVICE_LABEL = device_name or device_code or device_id or "camera"
+
+
+class DeviceLogFilter(logging.Filter):
+    def filter(self, record):
+        record.device = LOG_DEVICE_LABEL
+        return True
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - [%(device)s] - %(message)s'
+)
+logging.getLogger().addFilter(DeviceLogFilter())
 
 # MQTT Configuration
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'localhost')
@@ -79,13 +96,112 @@ MQTT_INTERVAL_MINUTES = int(os.getenv('MQTT_INTERVAL_MINUTES', 5))
 DAILY_SEND_TIME = os.getenv('DAILY_SEND_TIME', '23:59')  # Format: HH:MM
 
 RTSP_URL = os.getenv('RTSP_URL')
-resolution = ast.literal_eval(os.getenv("SCREEN_RESOLUTION"))
+resolution = ast.literal_eval(os.getenv("SCREEN_RESOLUTION", "[1280, 720]"))
+
+# Optional multi-camera config
+MULTI_CAMERA_CONFIG = os.getenv("MULTI_CAMERA_CONFIG")
+RUNNING_AS_WORKER = os.getenv("RUNNING_AS_WORKER", "0") == "1"
 
 # Line coordinates (support multiple gates)
 POINT_AXIS = os.getenv('POINT_AXIS', 'X')
 
 LINE_OFFSET = os.getenv('LINE_OFFSET', 'X')
-offset = int(os.getenv('OFFSET_AMOUNT'))
+offset = int(os.getenv('OFFSET_AMOUNT', 0))
+
+
+def load_cameras_config(config_path):
+    """Load multi-camera config JSON from disk."""
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Multi-camera config not found at {path}")
+
+    with path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    if not isinstance(data, list):
+        raise ValueError("Camera config must be a list of camera objects")
+
+    return data
+
+
+def _coerce_list(value, fallback):
+    """Ensure lists are serialized for env overrides."""
+    if value is None:
+        return json.dumps(fallback)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def build_env_for_camera(camera_cfg, base_env):
+    """
+    Build environment variables for a worker process from a camera config entry.
+    """
+    env = base_env.copy()
+    env["RUNNING_AS_WORKER"] = "1"
+
+    env["DEVICE_ID"] = str(camera_cfg.get("device_id", env.get("DEVICE_ID", "")))
+    env["DEVICE_CODE"] = str(camera_cfg.get("device_code", env.get("DEVICE_CODE", "")))
+    env["DEVICE_NAME"] = str(camera_cfg.get("device_name", env.get("DEVICE_NAME", "")))
+
+    if "rtsp_url" in camera_cfg:
+        env["RTSP_URL"] = str(camera_cfg["rtsp_url"])
+
+    if "screen_resolution" in camera_cfg:
+        env["SCREEN_RESOLUTION"] = _coerce_list(camera_cfg["screen_resolution"], resolution)
+
+    env["POINT_AXIS"] = str(camera_cfg.get("point_axis", env.get("POINT_AXIS", POINT_AXIS)))
+    env["LINE_OFFSET"] = str(camera_cfg.get("line_offset", env.get("LINE_OFFSET", LINE_OFFSET)))
+    env["OFFSET_AMOUNT"] = str(camera_cfg.get("offset_amount", env.get("OFFSET_AMOUNT", offset)))
+
+    # Optional MQTT overrides
+    if "mqtt_topic" in camera_cfg:
+        env["MQTT_TOPIC"] = str(camera_cfg["mqtt_topic"])
+    if "mqtt_interval_topic" in camera_cfg:
+        env["MQTT_INTERVAL_TOPIC"] = str(camera_cfg["mqtt_interval_topic"])
+
+    # Optional YOLO model override per camera
+    if "yolo_model" in camera_cfg:
+        env["YOLO_MODEL"] = str(camera_cfg["yolo_model"])
+
+    # Line definitions
+    for line_name, coords in camera_cfg.get("lines", {}).items():
+        env[line_name] = json.dumps(coords)
+
+    return env
+
+
+def start_multi_camera(config_path):
+    """
+    Spawn a worker process per camera configuration entry.
+    """
+    cameras = load_cameras_config(config_path)
+    if not cameras:
+        raise RuntimeError("Camera config is empty; add at least one camera entry.")
+
+    processes = []
+    base_env = os.environ.copy()
+
+    logging.info(f"Starting {len(cameras)} camera workers from {config_path}")
+    for idx, camera_cfg in enumerate(cameras):
+        env = build_env_for_camera(camera_cfg, base_env)
+        friendly_name = camera_cfg.get("name") or camera_cfg.get("device_name") or f"camera-{idx}"
+        logging.info(f"Launching worker for {friendly_name}")
+        proc = subprocess.Popen([sys.executable, __file__], env=env)
+        processes.append((friendly_name, proc))
+
+    try:
+        for friendly_name, proc in processes:
+            proc.wait()
+            logging.info(f"Worker {friendly_name} exited with code {proc.returncode}")
+    except KeyboardInterrupt:
+        logging.info("Received stop signal; terminating workers...")
+        for _, proc in processes:
+            proc.terminate()
+    finally:
+        for _, proc in processes:
+            if proc.poll() is None:
+                proc.kill()
 
 
 def _compute_offset_line(base_line, offset_value, mode):
@@ -1019,4 +1135,7 @@ def main():
         mqtt_client.disconnect()
 
 if __name__ == "__main__":
-    main()
+    if MULTI_CAMERA_CONFIG and not RUNNING_AS_WORKER:
+        start_multi_camera(MULTI_CAMERA_CONFIG)
+    else:
+        main()
