@@ -30,3 +30,13 @@ python ./main.py
 - List cameras in `config/cameras.json` (one object per camera with `device_id`, `rtsp_url`, `screen_resolution`, `lines`, and optional MQTT topics).
 - Set `MULTI_CAMERA_CONFIG=./config/cameras.json` in `.env` (or via docker-compose) to enable multi-camera mode.
 - Start the service as usual (`python main.py` or `docker-compose up`); the app will spawn one worker process per camera entry.
+
+## Preview cameras (easy debug outside Docker)
+This opens a window per camera, draws the lines from `config/cameras.json`, and waits for a key press.
+
+```bash
+python main.py --preview --config .\\config\\cameras.json
+```
+
+- Press any key to move to the next camera
+- Press `q` to quit

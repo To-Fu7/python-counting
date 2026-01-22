@@ -24,6 +24,7 @@ import string
 import subprocess
 import sys
 from pathlib import Path
+import argparse
 
 # Load environment variables before configuration
 load_dotenv('.env')
@@ -204,6 +205,88 @@ def start_multi_camera(config_path):
                 proc.kill()
 
 
+def _draw_camera_lines(frame, camera_cfg):
+    """
+    Draw lines from cameras.json entry onto the frame.
+    Expects camera_cfg["lines"] keys like lineA/lineB/lineC/lineD...
+    """
+    lines = camera_cfg.get("lines") or {}
+    if not isinstance(lines, dict):
+        return frame
+
+    # Draw known pairs (A/B, C/D, ...)
+    letters = string.ascii_uppercase
+    for i in range(0, len(letters), 2):
+        a = f"line{letters[i]}"
+        b = f"line{letters[i + 1]}" if i + 1 < len(letters) else None
+        if a not in lines:
+            continue
+        try:
+            in_line = lines[a]
+            if b and b in lines:
+                out_line = lines[b]
+            else:
+                out_line = None
+
+            # Normalize to tuples
+            in_p1, in_p2 = tuple(in_line[0]), tuple(in_line[1])
+            cv2.line(frame, in_p1, in_p2, (255, 0, 0), 4)  # IN (blue)
+
+            if out_line is not None:
+                out_p1, out_p2 = tuple(out_line[0]), tuple(out_line[1])
+                cv2.line(frame, out_p1, out_p2, (0, 255, 255), 4)  # OUT (yellow)
+        except Exception as e:
+            logging.warning(f"Failed drawing lines for {a}/{b}: {e}")
+
+    return frame
+
+
+def preview_cameras(config_path):
+    """
+    Debug helper: open each camera stream and show a frame with line overlays.
+    Best used outside Docker on a desktop with a display.
+    """
+    cameras = load_cameras_config(config_path)
+    if not cameras:
+        raise RuntimeError("Camera config is empty; add at least one camera entry.")
+
+    for idx, camera_cfg in enumerate(cameras):
+        name = camera_cfg.get("name") or camera_cfg.get("device_name") or f"camera-{idx}"
+        rtsp_url = camera_cfg.get("rtsp_url")
+        res = camera_cfg.get("screen_resolution") or resolution
+
+        logging.info(f"[preview] Opening {name}: {rtsp_url}")
+        cap = initialize_video_capture(rtsp_url)
+        if not cap.isOpened():
+            logging.error(f"[preview] Failed to open stream for {name}")
+            cap.release()
+            continue
+
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            logging.error(f"[preview] Failed to read frame for {name}")
+            continue
+
+        try:
+            frame = cv2.resize(frame, (int(res[0]), int(res[1])))
+        except Exception:
+            pass
+
+        frame = _draw_camera_lines(frame, camera_cfg)
+        cv2.putText(frame, f"{name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        win = f"preview: {name}"
+        cv2.imshow(win, frame)
+        logging.info("[preview] Press any key for next camera, or 'q' to quit.")
+        key = cv2.waitKey(0) & 0xFF
+        cv2.destroyWindow(win)
+        if key == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+
+
 def _compute_offset_line(base_line, offset_value, mode):
     """Compute an offset line from base_line using LINE_OFFSET and OFFSET_AMOUNT."""
     if mode == 'positive':
@@ -307,25 +390,36 @@ def load_line_pairs_from_env():
     return line_pairs
 
 
-# Load all line pairs at startup
-LINE_PAIRS = load_line_pairs_from_env()
+LINE_PAIRS = None
+lineA = None
+lineB = None
 
-# For backward-compatibility, keep references to the first pair as lineA/lineB
-lineA = LINE_PAIRS[0]["in_line"]
-lineB = LINE_PAIRS[0]["out_line"]
-
-logging.info(f"Total line pairs loaded: {len(LINE_PAIRS)}")
-
-
-# Detection region parameters (based on all line pairs)
+# Detection region parameters (initialized at runtime)
 DETECTION_MARGIN = 160
-all_line_points_y = []
-for lp in LINE_PAIRS:
-    for (x, y) in lp["in_line"] + lp["out_line"]:
-        all_line_points_y.append(y)
+DETECTION_Y_MIN = 0
+DETECTION_Y_MAX = 0
 
-DETECTION_Y_MIN = min(all_line_points_y) - DETECTION_MARGIN
-DETECTION_Y_MAX = max(all_line_points_y) + DETECTION_MARGIN
+
+def init_lines_and_detection_region():
+    """
+    Initialize LINE_PAIRS and detection region boundaries.
+    Must be called at runtime (worker/single-camera), not at import-time.
+    """
+    global LINE_PAIRS, lineA, lineB, DETECTION_Y_MIN, DETECTION_Y_MAX
+
+    LINE_PAIRS = load_line_pairs_from_env()
+    lineA = LINE_PAIRS[0]["in_line"]
+    lineB = LINE_PAIRS[0]["out_line"]
+
+    logging.info(f"Total line pairs loaded: {len(LINE_PAIRS)}")
+
+    all_line_points_y = []
+    for lp in LINE_PAIRS:
+        for (x, y) in lp["in_line"] + lp["out_line"]:
+            all_line_points_y.append(y)
+
+    DETECTION_Y_MIN = min(all_line_points_y) - DETECTION_MARGIN
+    DETECTION_Y_MAX = max(all_line_points_y) + DETECTION_MARGIN
 
 # Image quality settings
 CROP_PADDING = 30
@@ -876,6 +970,9 @@ def main():
     """Main function"""
     global person_in, person_out, is_midnight, record_id, latest_person_coordinates
     
+    # Initialize line pairs + detection region (worker/single-camera runtime)
+    init_lines_and_detection_region()
+    
     # Initialize MQTT
     init_mqtt()
     
@@ -1135,7 +1232,17 @@ def main():
         mqtt_client.disconnect()
 
 if __name__ == "__main__":
-    if MULTI_CAMERA_CONFIG and not RUNNING_AS_WORKER:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--preview", action="store_true", help="Preview cameras.json streams with line overlays")
+    parser.add_argument("--config", default=None, help="Path to cameras.json for preview (defaults to MULTI_CAMERA_CONFIG)")
+    args = parser.parse_args()
+
+    if args.preview:
+        cfg = args.config or MULTI_CAMERA_CONFIG
+        if not cfg:
+            raise RuntimeError("Set MULTI_CAMERA_CONFIG or pass --config for --preview")
+        preview_cameras(cfg)
+    elif MULTI_CAMERA_CONFIG and not RUNNING_AS_WORKER:
         start_multi_camera(MULTI_CAMERA_CONFIG)
     else:
         main()
