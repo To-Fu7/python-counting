@@ -49,7 +49,8 @@ MQTT_PASSWORD =  ''
 
 # Optional: multi-camera config (single container)
 # When set, this file lists all cameras and the service will spawn
-# one worker process per entry.
+# one processing thread per camera entry, sharing the YOLO model and resources.
+# To add cameras, edit config/cameras.json and restart the service - no new containers needed.
 MULTI_CAMERA_CONFIG=./config/cameras.json
 
 # DEBUG MODE

@@ -23,7 +23,7 @@
     "device_code": "wh-02",
     "device_name": "Warehouse",
     "rtsp_url": "rtsp://username:password@192.168.1.11/stream",
-    "screen_resolution": [1280, 720],
+    "screen_resolution": "original",
     "point_axis": "Y",
     "line_offset": "X",
     "offset_amount": 5,

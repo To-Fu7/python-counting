@@ -8,16 +8,23 @@ services:
     env_file:
       - .env
     environment:
+      # Path to cameras.json config file (mounted as volume)
+      # This enables multi-camera mode: one container runs multiple cameras using threads
       MULTI_CAMERA_CONFIG: /app/config/cameras.json
     # ports:
       # - "8080:8080"
     volumes:
+      # Mount the entire project directory (includes config/cameras.json)
       - .:/app
+      # Alternatively, mount only the config directory:
+      # - ./config:/app/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - envisions
     shm_size: 1gb
+    # Note: To add more cameras, simply edit config/cameras.json and restart the container.
+    # No need to create additional containers or services.
 
 networks:
   envisions:
@@ -25,30 +32,19 @@ networks:
 
 
 
-# DUPLICATE CONTAINER
-  # services-traffic-traffic-2:
-  #   image: in-out-counting-services-person-counter
-  #   container_name: services-traffic-counter-2
-  #   restart: unless-stopped
-  #   env_file:
-  #     - env_2
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   shm_size: 1gb
-  #   command: >
-  #     sh -c "pip install paho-mqtt ffmpeg-python && python main.py"
-
-  # services-traffic-counter-3:
-  #   image: in-out-counting-services-person-counter
-  #   container_name: services-traffic-counter-3
-  #   restart: unless-stopped
-  #   env_file:
-  #     - env_3
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   shm_size: 1g
-  #   command: >
-  #     sh -c "pip install paho-mqtt && python main.py"
+# NOTE: With multi-camera support, you no longer need multiple containers.
+# Simply add camera entries to config/cameras.json and restart the single service.
+# The service uses threading to process all cameras concurrently, sharing the YOLO model.
+#
+# OLD APPROACH (deprecated - use multi-camera config instead):
+#   # services-traffic-traffic-2:
+#   #   image: in-out-counting-services-person-counter
+#   #   container_name: services-traffic-counter-2
+#   #   restart: unless-stopped
+#   #   env_file:
+#   #     - env_2
+#   #   volumes:
+#   #     - .:/app
+#   #   runtime: nvidia
+#   #   shm_size: 1gb
   
