@@ -1132,7 +1132,7 @@ def debug_line_editor(config_path, camera_index=0):
     logging.info("=" * 60)
     logging.info("Instructions:")
     logging.info("  - Left click to set line points (first point, then second point)")
-    logging.info("  - Right click to reset current line")
+    logging.info("  - Press 'x' to reset current line")
     logging.info("  - Press 's' to save and update cameras.json")
     logging.info("  - Press 'q' to quit without saving")
     logging.info("  - Press 'n' to move to next line")
@@ -1186,7 +1186,7 @@ def debug_line_editor(config_path, camera_index=0):
         # Show instructions
         cv2.putText(display_frame, f"Editing: {current_line} (point {line_edit_state['current_point_index'] + 1}/2)", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(display_frame, "Left click: Set point | Right click: Reset | 's': Save | 'q': Quit | 'n': Next line", 
+        cv2.putText(display_frame, "Left click: Set point | 'x': Reset | 's': Save | 'q': Quit | 'n': Next line", 
                    (10, display_frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Show mouse position
@@ -1222,6 +1222,13 @@ def debug_line_editor(config_path, camera_index=0):
             else:
                 logging.warning("No complete lines to save")
             break
+        elif key == ord('x'):
+            # Reset current line (moved from right click)
+            current_line = line_edit_state["current_line"]
+            if current_line in line_edit_state["points"]:
+                line_edit_state["points"][current_line] = [None, None]
+                line_edit_state["current_point_index"] = 0
+                logging.info(f"Reset {current_line}, click to set first point again")
         elif key == ord('n'):
             # Move to next line
             letters = string.ascii_uppercase
@@ -1961,14 +1968,14 @@ def RGB(event, x, y, flags, param):
             else:
                 logging.info(f"All lines complete! Press 's' to save or 'q' to quit")
     
-    elif event == cv2.EVENT_RBUTTONDOWN:
-        # Right click to cancel current line or go back
-        if line_edit_state["editing"]:
-            current_line = line_edit_state["current_line"]
-            if current_line in line_edit_state["points"]:
-                line_edit_state["points"][current_line] = [None, None]
-                line_edit_state["current_point_index"] = 0
-                logging.info(f"Reset {current_line}, click to set first point again")
+    # elif event == cv2.EVENT_RBUTTONDOWN:
+    #     # Right click to cancel current line or go back
+    #     if line_edit_state["editing"]:
+    #         current_line = line_edit_state["current_line"]
+    #         if current_line in line_edit_state["points"]:
+    #             line_edit_state["points"][current_line] = [None, None]
+    #             line_edit_state["current_point_index"] = 0
+    #             logging.info(f"Reset {current_line}, click to set first point again")
 
 def main():
     """Main function"""
