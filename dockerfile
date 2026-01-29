@@ -1,41 +1,45 @@
-# Base image with Python (no CUDA)
-FROM python:3.10-slim-bullseye
+FROM nvidia/cuda:12.5.0-runtime-ubuntu22.04
 
-# Set environment variables for non-interactive installs and pip optimizations
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Update and install required system packages
-RUN apt-get update && \
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
+        python3.10 \
+        python3-pip \
+        python3-dev \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
-        libxrender1 \
+        libxrender-dev \
         ffmpeg \
         curl \
         git && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
 
-# Upgrade pip and install Python build tools
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+
 RUN pip install --upgrade pip setuptools wheel
 
-# Set workdir
+RUN pip install \
+    torch \
+    torchvision \
+    --index-url https://download.pytorch.org/whl/cu130
+
 WORKDIR /app
 
-# Copy requirements first to leverage caching
 COPY requirements.txt .
 
-# Install Python dependencies
 RUN pip install -r requirements.txt
 
-# Copy app files
-COPY main.py yolo11n.pt ./
+COPY main.py yolo11m.pt ./
 
-# Expose application port
 EXPOSE 8080
 
-# Run the app
 CMD ["python", "main.py"]
+

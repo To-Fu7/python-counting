@@ -1,21 +1,28 @@
 services:
-  services-person-counter:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: services-person-counter
+  services-python-1:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: python-counting-services-python-1:latest
+    container_name: services-python-1
     restart: unless-stopped
     env_file:
-      - .env
-    # ports:
-      # - "8080:8080"
+      - .env_b1
     volumes:
       - .:/app
+    runtime: nvidia
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - envisions
     shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 networks:
   envisions:

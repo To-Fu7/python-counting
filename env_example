@@ -13,7 +13,10 @@ PG_PASS=''
 
 # VIDEO STREAM URL
 RTSP_URL='./1.mp4' # RTSP URL, mp4 video path, or 0 for videocam
-OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|stimeout;5000000|max_delay;5000000|rw_timeout;5000000|fflags;nobuffer|flags;low_delay|reorder_queue_size;0
+
+# Hardware Video Decoding (NVDEC) - Requires NVIDIA GPU with CUDA
+# Set to 'true' to enable GPU-accelerated H.264/HEVC decoding (reduces CPU usage ~40-60%)
+ENABLE_NVDEC = 'false'
 # 800 x 600
 # 1024 x 768
 # 1280 x 720
@@ -28,6 +31,11 @@ POINT_AXIS= 'Y'
 lineA= [(240, 200), (240, 540)]
 lineB= [(245, 205), (245, 545)]
 
+# SWAP IN/OUT DIRECTION
+# 'false' = Cross OUT line first, then IN line to count IN (default)
+# 'true' = Cross IN line first, then OUT line to count IN
+SWAP_IN_OUT = 'false'
+
 # lineC= [(90, 270), (80, 630)]
 # lineD= [(95, 270), (85, 630)]
 
@@ -35,10 +43,22 @@ lineB= [(245, 205), (245, 545)]
 # MQTT
 MQTT_BROKER = 'localhost'
 MQTT_PORT = '1883'
-MQTT_USERNAME = '' 
+MQTT_USERNAME = ''
 MQTT_PASSWORD =  ''
 MQTT_TOPIC = '/person_in'
 MQTT_INTERVAL_TOPIC = '/resampling_person/****'
+
+# IMAGE QUALITY
+# JPEG quality for cropped person images sent via MQTT (1-100)
+# Lower = faster encoding, smaller payload, more compression artifacts
+# Default: 70 (good balance). Use 95 for high quality, 50 for minimal bandwidth.
+JPEG_QUALITY = 70
+
+# YOLO CONFIG
+# Model file (default: yolo11n.pt)
+# YOLO_MODEL = 'yolo11n.pt'
+# Confidence threshold (0.0-1.0) - higher = fewer false positives, may miss some detections
+YOLO_CONFIDENCE = 0.5
 
 # DEBUG MODE
 DEBUG_MODE = 'true'

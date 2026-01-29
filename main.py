@@ -21,6 +21,7 @@ import paho.mqtt.client as mqtt
 import threading
 import ast
 import string
+import queue
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -81,11 +82,19 @@ DAILY_SEND_TIME = os.getenv('DAILY_SEND_TIME', '23:59')  # Format: HH:MM
 RTSP_URL = os.getenv('RTSP_URL')
 resolution = ast.literal_eval(os.getenv("SCREEN_RESOLUTION"))
 
+# Hardware video decoding (NVDEC) - set to 'true' to enable CUDA hardware decoding
+ENABLE_NVDEC = os.getenv('ENABLE_NVDEC', 'false').lower() == 'true'
+
 # Line coordinates (support multiple gates)
 POINT_AXIS = os.getenv('POINT_AXIS', 'X')
 
 LINE_OFFSET = os.getenv('LINE_OFFSET', 'X')
-offset = int(os.getenv('OFFSET_AMOUNT'))
+offset = int(os.getenv('OFFSET_AMOUNT', 5))
+
+# Swap IN/OUT detection order
+# False = Cross OUT line first, then IN line to count IN (default)
+# True = Cross IN line first, then OUT line to count IN
+SWAP_IN_OUT = os.getenv('SWAP_IN_OUT', 'false').lower() == 'true'
 
 
 def _compute_offset_line(base_line, offset_value, mode):
@@ -199,6 +208,7 @@ lineA = LINE_PAIRS[0]["in_line"]
 lineB = LINE_PAIRS[0]["out_line"]
 
 logging.info(f"Total line pairs loaded: {len(LINE_PAIRS)}")
+logging.info(f"SWAP_IN_OUT = {SWAP_IN_OUT} ({'IN line first → count IN' if SWAP_IN_OUT else 'OUT line first → count IN'})")
 
 
 # Detection region parameters (based on all line pairs)
@@ -214,10 +224,11 @@ DETECTION_Y_MAX = max(all_line_points_y) + DETECTION_MARGIN
 # Image quality settings
 CROP_PADDING = 30
 MIN_CROP_SIZE = (128, 128)
-JPEG_QUALITY = 95
+JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', 70))  # Lower quality = faster encoding, smaller payload
 
 # YOLO CONFIG
 YOLO_MODEL = os.getenv('YOLO_MODEL', 'yolo11n.pt')
+YOLO_CONFIDENCE = float(os.getenv('YOLO_CONFIDENCE', 0.5))  # Confidence threshold (0.0-1.0)
 
 # DEBUG MODE
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'true').lower() == 'true'
@@ -457,6 +468,14 @@ def validate_cctv_connection(rtsp_url, timeout=5):
 def initialize_video_capture(video_source):
     """Initialize video capture with the given video source (RTSP URL or file path)"""
     logging.info(f'Initializing video capture with source: {video_source}')
+
+    # Enable NVIDIA hardware video decoding (NVDEC) if configured
+    if ENABLE_NVDEC:
+        # Set FFmpeg options for CUDA hardware decoding
+        # This offloads H.264/HEVC decoding from CPU to GPU
+        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'hwaccel;cuda|video_codec;h264_cuvid|rtsp_transport;tcp'
+        logging.info('NVDEC hardware decoding enabled (h264_cuvid)')
+
     cap = cv2.VideoCapture(video_source, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FPS, 10)
@@ -516,6 +535,33 @@ else:
     # logging.info("DEBUG_MODE: Skipping database connection initialization")
 
 logging.info(f"RESOLUTION = {resolution[0],resolution[1]}")
+
+# Async database write queue for non-blocking DB operations
+db_queue = queue.Queue()
+db_thread_running = True
+
+def db_worker():
+    """Background worker thread for async database writes"""
+    global db_thread_running
+    while db_thread_running:
+        try:
+            item = db_queue.get(timeout=1)
+            if item is None:
+                break
+            query, params = item
+            db_query(query, params, commit=True)
+            db_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logging.error(f"DB worker error: {e}")
+
+def db_queue_write(query, params):
+    """Queue a database write operation for async execution"""
+    if DEBUG_MODE:
+        logging.info(f"DEBUG_MODE: Skipping async DB write: {query}")
+        return
+    db_queue.put((query, params))
 
 
 def should_reset():
@@ -758,11 +804,17 @@ def RGB(event, x, y, flags, param):
 
 def main():
     """Main function"""
-    global person_in, person_out, is_midnight, record_id, latest_person_coordinates
-    
+    global person_in, person_out, is_midnight, record_id, latest_person_coordinates, interval_person_in, interval_person_out, db_thread_running
+
+    # Start async database worker thread
+    if not DEBUG_MODE:
+        db_worker_thread = threading.Thread(target=db_worker, daemon=True)
+        db_worker_thread.start()
+        logging.info("Async database worker thread started")
+
     # Initialize MQTT
     init_mqtt()
-    
+
     # Initialize database
     last_data_id = initialize_counts()
     if not last_data_id:
@@ -827,24 +879,29 @@ def main():
                 # Create cropped frame for YOLO detection (only the detection region)
                 detection_frame = frame[DETECTION_Y_MIN:DETECTION_Y_MAX, :]
                 
-                # Run YOLO only on the detection region
-                results = model.track(detection_frame, persist=True, verbose=False)
+                # Run YOLO only on the detection region with confidence threshold
+                results = model.track(detection_frame, persist=True, verbose=False, conf=YOLO_CONFIDENCE)
 
-                # Draw all IN/OUT lines
-                for lp in LINE_PAIRS:
-                    # IN LINE ( BLUE ) (BGR)
-                    cv2.line(frame, lp["in_line"][0], lp["in_line"][1], (255, 0, 0), 4)
-                    # OUT LINE ( YELLOW ) (BGR)
-                    cv2.line(frame, lp["out_line"][0], lp["out_line"][1], (0, 255, 255), 4)
-                
-                # Draw detection region boundaries
-                cv2.line(frame, (0, DETECTION_Y_MIN), (1920, DETECTION_Y_MIN), (0, 255, 0), 2)
-                cv2.line(frame, (0, DETECTION_Y_MAX), (1920, DETECTION_Y_MAX), (0, 222, 0), 2)
-                
-                cv2.putText(frame, 'Detection Region', (10, DETECTION_Y_MIN - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # Draw all IN/OUT lines (only in DEBUG_MODE)
+                if DEBUG_MODE:
+                    for lp in LINE_PAIRS:
+                        # IN LINE ( BLUE ) (BGR)
+                        cv2.line(frame, lp["in_line"][0], lp["in_line"][1], (255, 0, 0), 4)
+                        # OUT LINE ( YELLOW ) (BGR)
+                        cv2.line(frame, lp["out_line"][0], lp["out_line"][1], (0, 255, 255), 4)
 
-                original_frame = frame.copy()
+                    # Draw detection region boundaries
+                    cv2.line(frame, (0, DETECTION_Y_MIN), (1920, DETECTION_Y_MIN), (0, 255, 0), 2)
+                    cv2.line(frame, (0, DETECTION_Y_MAX), (1920, DETECTION_Y_MAX), (0, 222, 0), 2)
+
+                    cv2.putText(frame, 'Detection Region', (10, DETECTION_Y_MIN - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                # Only copy frame in DEBUG_MODE, otherwise use reference (saves CPU)
+                if DEBUG_MODE:
+                    original_frame = frame.copy()
+                else:
+                    original_frame = frame
 
                 person_detected = False
                 region_detections = 0
@@ -894,11 +951,12 @@ def main():
 
                             prev_points = last_points[track_id]
 
-                            # Draw person detection
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                            cvzone.putTextRect(frame, f'{track_id}', (x1, y1), 1, 1)
-                            cv2.circle(frame, first_point, 4, (255, 0, 0), 2)
-                            cv2.circle(frame, second_point, 4, (0, 255, 255), 2)
+                            # Draw person detection (only in DEBUG_MODE)
+                            if DEBUG_MODE:
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                                cvzone.putTextRect(frame, f'{track_id}', (x1, y1), 1, 1)
+                                cv2.circle(frame, first_point, 4, (255, 0, 0), 2)
+                                cv2.circle(frame, second_point, 4, (0, 255, 255), 2)
 
                             if prev_points[0] is not None and prev_points[1] is not None:
                                 prev_top, prev_bottom = prev_points
@@ -909,63 +967,107 @@ def main():
                                     crossed_A = is_crossing_line(prev_top, first_point, lp["in_line"])
                                     crossed_B = is_crossing_line(prev_bottom, second_point, lp["out_line"])
 
-                                    if crossed_A:
-                                        if state_in.get(gate_key):
-                                            global interval_person_in
-                                            person_in += 1
-                                            interval_person_in += 1
-                                            class_counts['in'] = person_in
+                                    # SWAP_IN_OUT swaps which line triggers IN vs OUT
+                                    # False (default): Cross B first, then A = IN | Cross A first, then B = OUT
+                                    # True (swapped):  Cross A first, then B = IN | Cross B first, then A = OUT
+                                    if SWAP_IN_OUT:
+                                        # Swapped mode
+                                        if crossed_A:
+                                            if state_out.get(gate_key):
+                                                person_out += 1
+                                                interval_person_out += 1
+                                                class_counts['out'] = person_out
 
-                                            # Update database
-                                            if not DEBUG_MODE:
-                                                db_query(
-                                                    "UPDATE person_inout SET total_in = %s WHERE id = %s",
-                                                    (person_in, record_id), commit=True
-                                                )
-                                            else:
-                                                logging.info("DEBUG_MODE: Skipping DB update for person_in")
-
-                                            # Crop and send via MQTT
-                                            send_person_in_mqtt(original_frame, record_id, "person_in")
-
-                                            logging.info(
-                                                f'Person {track_id} In through gate {gate_index} - Total in: {person_in}'
-                                            )
-                                            state_in[gate_key] = False
-                                        else:
-                                            state_out[gate_key] = True
-                                            logging.info(
-                                                f'Person {track_id} crossed IN line of gate {gate_index} (preparing for In)'
-                                            )
-
-                                    # When a person exits (crossed_B section):
-                                    elif crossed_B:
-                                        if state_out.get(gate_key):
-                                            global interval_person_out
-                                            person_out += 1
-                                            interval_person_out += 1
-                                            class_counts['out'] = person_out
-
-                                            if not DEBUG_MODE:
-                                                db_query(
+                                                # Async DB update (non-blocking)
+                                                db_queue_write(
                                                     "UPDATE person_inout SET total_out = %s WHERE id = %s",
-                                                    (person_out, record_id), commit=True
+                                                    (person_out, record_id)
                                                 )
+
+                                                send_person_in_mqtt(original_frame, record_id, "person_out")
+
+                                                logging.info(
+                                                    f'Person {track_id} OUT through gate {gate_index} - Total OUT: {person_out}'
+                                                )
+                                                state_out[gate_key] = False
                                             else:
-                                                logging.info("DEBUG_MODE: Skipping DB update for person_out")
+                                                state_in[gate_key] = True
+                                                logging.info(
+                                                    f'Person {track_id} crossed IN line of gate {gate_index} (preparing for In)'
+                                                )
 
-                                            # Crop and send via MQTT
-                                            send_person_in_mqtt(original_frame, record_id, "person_out")
+                                        elif crossed_B:
+                                            if state_in.get(gate_key):
+                                                person_in += 1
+                                                interval_person_in += 1
+                                                class_counts['in'] = person_in
 
-                                            logging.info(
-                                                f'Person {track_id} OUT through gate {gate_index} - Total OUT: {person_out}'
-                                            )
-                                            state_out[gate_key] = False
-                                        else:
-                                            state_in[gate_key] = True
-                                            logging.info(
-                                                f'Person {track_id} crossed OUT line of gate {gate_index} (preparing for Out)'
-                                            )
+                                                # Async DB update (non-blocking)
+                                                db_queue_write(
+                                                    "UPDATE person_inout SET total_in = %s WHERE id = %s",
+                                                    (person_in, record_id)
+                                                )
+
+                                                send_person_in_mqtt(original_frame, record_id, "person_in")
+
+                                                logging.info(
+                                                    f'Person {track_id} IN through gate {gate_index} - Total IN: {person_in}'
+                                                )
+                                                state_in[gate_key] = False
+                                            else:
+                                                state_out[gate_key] = True
+                                                logging.info(
+                                                    f'Person {track_id} crossed OUT line of gate {gate_index} (preparing for Out)'
+                                                )
+                                    else:
+                                        # Default mode
+                                        if crossed_A:
+                                            if state_in.get(gate_key):
+                                                person_in += 1
+                                                interval_person_in += 1
+                                                class_counts['in'] = person_in
+
+                                                # Async DB update (non-blocking)
+                                                db_queue_write(
+                                                    "UPDATE person_inout SET total_in = %s WHERE id = %s",
+                                                    (person_in, record_id)
+                                                )
+
+                                                send_person_in_mqtt(original_frame, record_id, "person_in")
+
+                                                logging.info(
+                                                    f'Person {track_id} IN through gate {gate_index} - Total IN: {person_in}'
+                                                )
+                                                state_in[gate_key] = False
+                                            else:
+                                                state_out[gate_key] = True
+                                                logging.info(
+                                                    f'Person {track_id} crossed IN line of gate {gate_index} (preparing for Out)'
+                                                )
+
+                                        elif crossed_B:
+                                            if state_out.get(gate_key):
+                                                person_out += 1
+                                                interval_person_out += 1
+                                                class_counts['out'] = person_out
+
+                                                # Async DB update (non-blocking)
+                                                db_queue_write(
+                                                    "UPDATE person_inout SET total_out = %s WHERE id = %s",
+                                                    (person_out, record_id)
+                                                )
+
+                                                send_person_in_mqtt(original_frame, record_id, "person_out")
+
+                                                logging.info(
+                                                    f'Person {track_id} OUT through gate {gate_index} - Total OUT: {person_out}'
+                                                )
+                                                state_out[gate_key] = False
+                                            else:
+                                                state_in[gate_key] = True
+                                                logging.info(
+                                                    f'Person {track_id} crossed OUT line of gate {gate_index} (preparing for In)'
+                                                )
 
                             last_points[track_id] = (first_point, second_point)
                 
@@ -979,12 +1081,12 @@ def main():
                         logging.info("Waiting for person detection...")
                         last_waiting_log = current_time
 
-                # Display counters
-                cv2.putText(frame, f'IN: {person_in}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.putText(frame, f'OUT: {person_out}', (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                cv2.putText(frame, f'Region Detections: {region_detections}', (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                
-                
+                # Display counters (only in DEBUG_MODE)
+                if DEBUG_MODE:
+                    cv2.putText(frame, f'IN: {person_in}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(frame, f'OUT: {person_out}', (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    cv2.putText(frame, f'Region Detections: {region_detections}', (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
                 #SCREEN
                 if DEBUG_MODE:
                     cv2.imshow("RGB", frame)
