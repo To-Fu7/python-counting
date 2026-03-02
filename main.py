@@ -4,6 +4,7 @@ import cv2
 import json
 import datetime
 import uuid
+import math
 import numpy as np
 from ultralytics import YOLO
 import cvzone
@@ -12,7 +13,6 @@ import psycopg2
 import time
 import logging
 from collections import defaultdict
-from shapely.geometry import LineString
 from zoneinfo import ZoneInfo
 import asyncio
 import base64
@@ -28,9 +28,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # GLOBAL VARIABLES
 local_tz = ZoneInfo("Asia/Jakarta")
-last_points = defaultdict(lambda: (None, None)) 
+last_points = defaultdict(lambda: (None, None))
 state_in = defaultdict(lambda: False)
 state_out = defaultdict(lambda: False)
+prev_intersecting = defaultdict(lambda: False)
 class_counts = defaultdict(int)
 person_history = {}
 is_midnight = False
@@ -87,27 +88,35 @@ ENABLE_NVDEC = os.getenv('ENABLE_NVDEC', 'false').lower() == 'true'
 
 # Line coordinates (support multiple gates)
 POINT_AXIS = os.getenv('POINT_AXIS', 'X')
+DETECTION_STYLE = os.getenv('DETECTION_STYLE', 'dot').lower()
 
 LINE_OFFSET = os.getenv('LINE_OFFSET', 'X')
-offset = int(os.getenv('OFFSET_AMOUNT', 5))
+LINE_OFFSET_AMOUNT = int(os.getenv('LINE_OFFSET_AMOUNT', 5))
+
+DOT_OFFSET = os.getenv('DOT_OFFSET', 'Y')
+DOT_OFFSET_AMOUNT = int(os.getenv('DOT_OFFSET_AMOUNT', 0))
 
 # Swap IN/OUT detection order
 # False = Cross OUT line first, then IN line to count IN (default)
 # True = Cross IN line first, then OUT line to count IN
 SWAP_IN_OUT = os.getenv('SWAP_IN_OUT', 'false').lower() == 'true'
 
+# Merge all gates into one logical gate
+# When true, crossing ANY in_line then ANY out_line (from any gate) counts as a single event
+MERGE_GATES = os.getenv('MERGE_GATES', 'false').lower() == 'true'
 
-def _compute_offset_line(base_line, offset_value, mode):
-    """Compute an offset line from base_line using LINE_OFFSET and OFFSET_AMOUNT."""
-    if mode == 'positive':
+
+def _compute_offset_line(base_line, offset_value, axis):
+    """Compute an offset line from base_line along the given axis (X or Y)."""
+    if axis == 'X':
         return [
-            (base_line[0][0] + offset_value, base_line[0][1] + offset_value),
-            (base_line[1][0] + offset_value, base_line[1][1] + offset_value),
+            (base_line[0][0] + offset_value, base_line[0][1]),
+            (base_line[1][0] + offset_value, base_line[1][1]),
         ]
-    elif mode == 'negative':
+    elif axis == 'Y':
         return [
-            (base_line[0][0] - offset_value, base_line[0][1] - offset_value),
-            (base_line[1][0] - offset_value, base_line[1][1] - offset_value),
+            (base_line[0][0], base_line[0][1] + offset_value),
+            (base_line[1][0], base_line[1][1] + offset_value),
         ]
     else:
         # If LINE_OFFSET is not recognized, just return the base line
@@ -126,7 +135,7 @@ def load_line_pairs_from_env():
 
     Rules:
       - If only the first line of a pair exists (e.g. lineA, but no lineB),
-        the second line is generated using LINE_OFFSET and OFFSET_AMOUNT.
+        the second line is generated using LINE_OFFSET and LINE_OFFSET_AMOUNT.
       - If both lines exist (e.g. lineC and lineD), they are used as-is.
       - If neither exists, that pair is skipped.
     """
@@ -174,7 +183,7 @@ def load_line_pairs_from_env():
                 continue
         else:
             # Generate second line from first using offset
-            second_line = _compute_offset_line(first_line, offset, LINE_OFFSET)
+            second_line = _compute_offset_line(first_line, LINE_OFFSET_AMOUNT, LINE_OFFSET)
 
         line_pairs.append(
             {
@@ -209,17 +218,28 @@ lineB = LINE_PAIRS[0]["out_line"]
 
 logging.info(f"Total line pairs loaded: {len(LINE_PAIRS)}")
 logging.info(f"SWAP_IN_OUT = {SWAP_IN_OUT} ({'IN line first → count IN' if SWAP_IN_OUT else 'OUT line first → count IN'})")
+logging.info(f"MERGE_GATES = {MERGE_GATES} ({'all gates unified' if MERGE_GATES else 'gates isolated'})")
 
 
 # Detection region parameters (based on all line pairs)
-DETECTION_MARGIN = 160
+# 'false' or '0' = global detection (full frame), any number = margin in pixels
+_detection_margin_raw = os.getenv('DETECTION_MARGIN', '160').strip().lower()
+GLOBAL_DETECTION = _detection_margin_raw in ('false', '0')
+DETECTION_MARGIN = 0 if GLOBAL_DETECTION else int(_detection_margin_raw)
+
 all_line_points_y = []
 for lp in LINE_PAIRS:
     for (x, y) in lp["in_line"] + lp["out_line"]:
         all_line_points_y.append(y)
 
-DETECTION_Y_MIN = min(all_line_points_y) - DETECTION_MARGIN
-DETECTION_Y_MAX = max(all_line_points_y) + DETECTION_MARGIN
+if GLOBAL_DETECTION:
+    DETECTION_Y_MIN = 0
+    DETECTION_Y_MAX = None  # Will use full frame height
+    logging.info("Detection region: GLOBAL (full frame)")
+else:
+    DETECTION_Y_MIN = max(0, min(all_line_points_y) - DETECTION_MARGIN)
+    DETECTION_Y_MAX = max(all_line_points_y) + DETECTION_MARGIN
+    logging.info(f"Detection region: Y from {DETECTION_Y_MIN} to {DETECTION_Y_MAX} (margin: {DETECTION_MARGIN}px)")
 
 # Image quality settings
 CROP_PADDING = 30
@@ -228,10 +248,29 @@ JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', 70))  # Lower quality = faster enco
 
 # YOLO CONFIG
 YOLO_MODEL = os.getenv('YOLO_MODEL', 'yolo11n.pt')
-YOLO_CONFIDENCE = float(os.getenv('YOLO_CONFIDENCE', 0.5))  # Confidence threshold (0.0-1.0)
+YOLO_CONFIDENCE = float(os.getenv('YOLO_CONFIDENCE', 0.3))  # Confidence threshold (0.0-1.0)
+YOLO_DEVICE = os.getenv('YOLO_DEVICE', 'auto')  # Device: 'auto', 'cpu', '0', 'cuda:0'
+
+# PERFORMANCE
+FPS_LIMIT = float(os.getenv('FPS_LIMIT', '0'))  # 0 = no limit, >0 = max processing FPS
+FRAME_INTERVAL = 1.0 / FPS_LIMIT if FPS_LIMIT > 0 else 0
+FRAME_SKIP = int(os.getenv('FRAME_SKIP', '2'))  # Process 1 out of every N frames
 
 # DEBUG MODE
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'true').lower() == 'true'
+
+def resolve_yolo_device(device_str):
+    if device_str.lower() == 'auto':
+        import torch
+        if torch.cuda.is_available():
+            resolved = '0'
+            logging.info(f"YOLO_DEVICE=auto: CUDA available, using GPU 0 ({torch.cuda.get_device_name(0)})")
+        else:
+            resolved = 'cpu'
+            logging.info("YOLO_DEVICE=auto: No CUDA available, falling back to CPU")
+        return resolved
+    logging.info(f"YOLO_DEVICE set to: {device_str}")
+    return device_str
 
 # MQTT Client
 mqtt_client = None
@@ -341,18 +380,33 @@ def get_age_gender_data_from_db():
 def send_interval_mqtt_data():
     """Send interval data via MQTT (every 5 minutes and at 23:59)"""
     global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
-    
+
     if DEBUG_MODE:
         # logging.info("DEBUG_MODE: Skipping interval MQTT data send")
         return
-    
+
     if mqtt_client is None:
         logging.warning("MQTT client not initialized, skipping interval data")
         return
-    
+
+    # Guard against rapid re-entry (multiple frames triggering in the same tick)
+    current_time = datetime.datetime.now(local_tz)
+    if last_mqtt_send is not None:
+        elapsed = (current_time - last_mqtt_send).total_seconds()
+        if elapsed < (MQTT_INTERVAL_MINUTES * 60) - 5:
+            logging.warning(f"Skipping duplicate interval send (only {elapsed:.0f}s since last)")
+            return
+
+    # Mark send time BEFORE publish to block any concurrent calls
+    last_mqtt_send = current_time
+
+    # Snapshot and reset counters atomically before publish
+    snapshot_in = interval_person_in
+    snapshot_out = interval_person_out
+    interval_person_in = 0
+    interval_person_out = 0
+
     try:
-        current_time = datetime.datetime.now(local_tz)
-        
         # Create payload with current interval counts (not total)
         payload = {
             "record_id": record_id,
@@ -362,30 +416,31 @@ def send_interval_mqtt_data():
             "timestamp": current_time.isoformat(),
             "event": "interval_data",
             "data": {
-                "interval_in": interval_person_in,  # Current interval count
-                "interval_out": interval_person_out,  # Current interval count
+                "interval_in": snapshot_in,
+                "interval_out": snapshot_out,
                 "total_in": person_in,  # Keep total for reference
                 "total_out": person_out,  # Keep total for reference
                 "net_count": person_in - person_out,
-                "interval_net": interval_person_in - interval_person_out,  # Net for this interval
+                "interval_net": snapshot_in - snapshot_out,
                 "interval_minutes": MQTT_INTERVAL_MINUTES
             }
         }
-        
+
         # Send to MQTT
         result = mqtt_client.publish(MQTT_INTERVAL_TOPIC, json.dumps(payload), qos=1)
-        
+
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            logging.info(f"Interval data sent via MQTT - Interval IN: {interval_person_in}, Interval OUT: {interval_person_out}, Total IN: {person_in}, Total OUT: {person_out}")
-            last_mqtt_send = current_time
-            
-            # Reset interval counters after sending
-            interval_person_in = 0
-            interval_person_out = 0
+            logging.info(f"Interval data sent via MQTT - Interval IN: {snapshot_in}, Interval OUT: {snapshot_out}, Total IN: {person_in}, Total OUT: {person_out}")
         else:
+            # Restore counters on publish failure
+            interval_person_in += snapshot_in
+            interval_person_out += snapshot_out
             logging.error(f"Failed to send interval MQTT data, error code: {result.rc}")
-            
+
     except Exception as e:
+        # Restore counters on exception
+        interval_person_in += snapshot_in
+        interval_person_out += snapshot_out
         logging.error(f"Error sending interval MQTT data: {e}")
 
 
@@ -419,19 +474,40 @@ def should_send_interval_mqtt():
 
 def is_in_detection_region(box):
     """Check if detected person is within the detection region"""
+    if GLOBAL_DETECTION:
+        return True
     x1, y1, x2, y2 = box
     return not (y2 < DETECTION_Y_MIN or y1 > DETECTION_Y_MAX)
 
 def is_crossing_line(p1, p2, line):
-    """Check if line segment p1-p2 crosses the given line"""
+    """Check if segment p1-p2 crosses the given line using cross product"""
     if p1 is None or p2 is None:
         return False
     try:
-        person_line = LineString([p1, p2])
-        the_line = LineString(line)
-        return person_line.crosses(the_line)
-    except Exception as e:
-        logging.warning(f"Error checking line crossing: {e}")
+        a, b = line[0], line[1]
+        d1 = (b[0]-a[0])*(p1[1]-a[1]) - (b[1]-a[1])*(p1[0]-a[0])
+        d2 = (b[0]-a[0])*(p2[1]-a[1]) - (b[1]-a[1])*(p2[0]-a[0])
+        if d1 * d2 >= 0:
+            return False
+        d3 = (p2[0]-p1[0])*(a[1]-p1[1]) - (p2[1]-p1[1])*(a[0]-p1[0])
+        d4 = (p2[0]-p1[0])*(b[1]-p1[1]) - (p2[1]-p1[1])*(b[0]-p1[0])
+        return d3 * d4 < 0
+    except Exception:
+        return False
+
+def is_edge_intersecting(edge_start, edge_end, detection_line):
+    """Check if bbox edge segment intersects with the detection line using cross product"""
+    try:
+        p1, p2 = edge_start, edge_end
+        a, b = detection_line[0], detection_line[1]
+        d1 = (b[0]-a[0])*(p1[1]-a[1]) - (b[1]-a[1])*(p1[0]-a[0])
+        d2 = (b[0]-a[0])*(p2[1]-a[1]) - (b[1]-a[1])*(p2[0]-a[0])
+        if d1 * d2 > 0:
+            return False
+        d3 = (p2[0]-p1[0])*(a[1]-p1[1]) - (p2[1]-p1[1])*(a[0]-p1[0])
+        d4 = (p2[0]-p1[0])*(b[1]-p1[1]) - (p2[1]-p1[1])*(b[0]-p1[0])
+        return d3 * d4 <= 0
+    except Exception:
         return False
 
 def validate_cctv_connection(rtsp_url, timeout=5):
@@ -464,6 +540,12 @@ def validate_cctv_connection(rtsp_url, timeout=5):
     except Exception as e:
         logging.warning(f"CCTV validation error: {e}")
         return False
+
+def safe_destroy_windows():
+    try:
+        cv2.destroyAllWindows()
+    except cv2.error:
+        pass
 
 def initialize_video_capture(video_source):
     """Initialize video capture with the given video source (RTSP URL or file path)"""
@@ -726,7 +808,7 @@ def initialize_counts():
 
 def reset_counts():
     """Reset counts at midnight"""
-    global class_counts, state_in, state_out, person_history, record_id, person_in, person_out, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
+    global class_counts, state_in, state_out, prev_intersecting, person_history, record_id, person_in, person_out, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
     
     # Send final daily report before reset
     send_interval_mqtt_data()
@@ -738,6 +820,7 @@ def reset_counts():
     class_counts['out'] = 0
     state_in.clear()
     state_out.clear()
+    prev_intersecting.clear()
     person_history.clear()
     
     new_id = str(uuid.uuid4())
@@ -825,7 +908,6 @@ def main():
             logging.info("DEBUG_MODE: Continuing without database initialization")
     
     # Log configuration
-    logging.info(f"Detection region: Y from {DETECTION_Y_MIN} to {DETECTION_Y_MAX} (margin: {DETECTION_MARGIN}px)")
     logging.info(f"MQTT interval: {MQTT_INTERVAL_MINUTES} minutes")
     logging.info(f"Daily MQTT send time: {DAILY_SEND_TIME}")
     logging.info(f"Image crop settings - Padding: {CROP_PADDING}px, Min size: {MIN_CROP_SIZE}, Quality: {JPEG_QUALITY}%")
@@ -839,6 +921,7 @@ def main():
         return
     
     model = YOLO(YOLO_MODEL)
+    resolved_device = resolve_yolo_device(YOLO_DEVICE)
     names = model.names
 
     last_waiting_log = time.time()
@@ -863,11 +946,23 @@ def main():
                 cv2.setMouseCallback('RGB', RGB)
 
             count = 0
+            last_process_time = time.time()
+            fps_counter = 0
+            fps_timer = time.time()
             while True:
-                ret, frame = cap.read()
                 count += 1
-                if count % 2 != 0:
+                if count % FRAME_SKIP != 0:
+                    cap.grab()  # Advance buffer without decoding
                     continue
+                ret, frame = cap.read()
+
+                # FPS limiting
+                if FRAME_INTERVAL > 0:
+                    elapsed = time.time() - last_process_time
+                    if elapsed < FRAME_INTERVAL:
+                        time.sleep(FRAME_INTERVAL - elapsed)
+                    last_process_time = time.time()
+
                 if not ret:
                     logging.error(f"Failed to read frame from video source: {video_source}")
                     raise Exception(f"Frame read error or video source disconnected: {video_source}")
@@ -876,11 +971,14 @@ def main():
                 # frame = cv2.resize(frame, (1280, 720))
                 frame = cv2.resize(frame, (resolution[0], resolution[1]))
 
-                # Create cropped frame for YOLO detection (only the detection region)
-                detection_frame = frame[DETECTION_Y_MIN:DETECTION_Y_MAX, :]
+                # Create detection frame (cropped region or full frame)
+                if GLOBAL_DETECTION:
+                    detection_frame = frame
+                else:
+                    detection_frame = frame[DETECTION_Y_MIN:DETECTION_Y_MAX, :]
                 
                 # Run YOLO only on the detection region with confidence threshold
-                results = model.track(detection_frame, persist=True, verbose=False, conf=YOLO_CONFIDENCE)
+                results = model.track(detection_frame, persist=True, verbose=False, conf=YOLO_CONFIDENCE, device=resolved_device, classes=[0], iou=0.45, tracker="bytetrack.yaml")
 
                 # Draw all IN/OUT lines (only in DEBUG_MODE)
                 if DEBUG_MODE:
@@ -890,12 +988,43 @@ def main():
                         # OUT LINE ( YELLOW ) (BGR)
                         cv2.line(frame, lp["out_line"][0], lp["out_line"][1], (0, 255, 255), 4)
 
-                    # Draw detection region boundaries
-                    cv2.line(frame, (0, DETECTION_Y_MIN), (1920, DETECTION_Y_MIN), (0, 255, 0), 2)
-                    cv2.line(frame, (0, DETECTION_Y_MAX), (1920, DETECTION_Y_MAX), (0, 222, 0), 2)
+                        # Draw IN/OUT direction arrows
+                        in_mid = ((lp["in_line"][0][0] + lp["in_line"][1][0]) // 2,
+                                  (lp["in_line"][0][1] + lp["in_line"][1][1]) // 2)
+                        out_mid = ((lp["out_line"][0][0] + lp["out_line"][1][0]) // 2,
+                                   (lp["out_line"][0][1] + lp["out_line"][1][1]) // 2)
+                        dx = out_mid[0] - in_mid[0]
+                        dy = out_mid[1] - in_mid[1]
+                        dist = math.sqrt(dx * dx + dy * dy)
+                        if dist > 0:
+                            ux, uy = dx / dist, dy / dist
+                            # Arrow on in_line's outer side (pointing toward in_line)
+                            a_start = (int(in_mid[0] - ux * 50), int(in_mid[1] - uy * 50))
+                            a_end = (int(in_mid[0] - ux * 20), int(in_mid[1] - uy * 20))
+                            # Arrow on out_line's outer side (pointing toward out_line)
+                            b_start = (int(out_mid[0] + ux * 50), int(out_mid[1] + uy * 50))
+                            b_end = (int(out_mid[0] + ux * 20), int(out_mid[1] + uy * 20))
 
-                    cv2.putText(frame, 'Detection Region', (10, DETECTION_Y_MIN - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                            if SWAP_IN_OUT:
+                                in_start, in_end = a_start, a_end
+                                out_start, out_end = b_start, b_end
+                            else:
+                                in_start, in_end = b_start, b_end
+                                out_start, out_end = a_start, a_end
+
+                            cv2.arrowedLine(frame, in_start, in_end, (0, 255, 0), 2, tipLength=0.3)
+                            cv2.putText(frame, 'IN', (in_start[0] - 5, in_start[1] - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                            cv2.arrowedLine(frame, out_start, out_end, (0, 0, 255), 2, tipLength=0.3)
+                            cv2.putText(frame, 'OUT', (out_start[0] - 10, out_start[1] - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+                    # Draw detection region boundaries (skip in global mode)
+                    if not GLOBAL_DETECTION:
+                        cv2.line(frame, (0, DETECTION_Y_MIN), (1920, DETECTION_Y_MIN), (0, 255, 0), 2)
+                        cv2.line(frame, (0, DETECTION_Y_MAX), (1920, DETECTION_Y_MAX), (0, 222, 0), 2)
+                        cv2.putText(frame, 'Detection Region', (10, DETECTION_Y_MIN - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
                 # Only copy frame in DEBUG_MODE, otherwise use reference (saves CPU)
                 if DEBUG_MODE:
@@ -942,30 +1071,62 @@ def main():
                             latest_person_coordinates.append(person_coord)
                             
                             
-                            if POINT_AXIS == "Y":
-                                first_point = ((x1 + x2) // 2, y1)
-                                second_point = ((x1 + x2) // 2, y2)
-                            elif POINT_AXIS == "X":
-                                first_point = (x1, (y1 + y2) // 2)
-                                second_point = (x2, (y1 + y2) // 2)
-
-                            prev_points = last_points[track_id]
+                            # Calculate detection points/edges based on DETECTION_STYLE
+                            if DETECTION_STYLE == 'line':
+                                if POINT_AXIS == "Y":
+                                    first_edge = ((x1, y1), (x2, y1))
+                                    second_edge = ((x1, y2), (x2, y2))
+                                elif POINT_AXIS == "X":
+                                    first_edge = ((x1, y1), (x1, y2))
+                                    second_edge = ((x2, y1), (x2, y2))
+                            else:
+                                if POINT_AXIS == "Y":
+                                    first_point = ((x1 + x2) // 2, y1 - DOT_OFFSET_AMOUNT)
+                                    second_point = ((x1 + x2) // 2, y2 + DOT_OFFSET_AMOUNT)
+                                elif POINT_AXIS == "X":
+                                    first_point = (x1 - DOT_OFFSET_AMOUNT, (y1 + y2) // 2)
+                                    second_point = (x2 + DOT_OFFSET_AMOUNT, (y1 + y2) // 2)
 
                             # Draw person detection (only in DEBUG_MODE)
                             if DEBUG_MODE:
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                                 cvzone.putTextRect(frame, f'{track_id}', (x1, y1), 1, 1)
-                                cv2.circle(frame, first_point, 4, (255, 0, 0), 2)
-                                cv2.circle(frame, second_point, 4, (0, 255, 255), 2)
+                                if DETECTION_STYLE == 'line':
+                                    cv2.line(frame, first_edge[0], first_edge[1], (255, 0, 0), 2)
+                                    cv2.line(frame, second_edge[0], second_edge[1], (0, 255, 255), 2)
+                                else:
+                                    cv2.circle(frame, first_point, 4, (255, 0, 0), 2)
+                                    cv2.circle(frame, second_point, 4, (0, 255, 255), 2)
 
-                            if prev_points[0] is not None and prev_points[1] is not None:
-                                prev_top, prev_bottom = prev_points
+                            # Determine if crossing detection can run
+                            can_check_crossing = True
+                            if DETECTION_STYLE != 'line':
+                                prev_points = last_points[track_id]
+                                if prev_points[0] is None or prev_points[1] is None:
+                                    can_check_crossing = False
+                                else:
+                                    prev_top, prev_bottom = prev_points
+
+                            if can_check_crossing:
                                 # Check crossings against all line pairs
                                 for gate_index, lp in enumerate(LINE_PAIRS):
-                                    gate_key = (track_id, gate_index)
+                                    gate_key = track_id if MERGE_GATES else (track_id, gate_index)
+                                    gate_label = "merged" if MERGE_GATES else f"gate {gate_index}"
 
-                                    crossed_A = is_crossing_line(prev_top, first_point, lp["in_line"])
-                                    crossed_B = is_crossing_line(prev_bottom, second_point, lp["out_line"])
+                                    if DETECTION_STYLE == 'line':
+                                        # Edge intersection with entry-event detection
+                                        touching_in = is_edge_intersecting(first_edge[0], first_edge[1], lp["in_line"])
+                                        touching_out = is_edge_intersecting(second_edge[0], second_edge[1], lp["out_line"])
+                                        in_key = (track_id, 'in') if MERGE_GATES else (track_id, gate_index, 'in')
+                                        out_key = (track_id, 'out') if MERGE_GATES else (track_id, gate_index, 'out')
+                                        crossed_A = touching_in and not prev_intersecting.get(in_key, False)
+                                        crossed_B = touching_out and not prev_intersecting.get(out_key, False)
+                                        prev_intersecting[in_key] = touching_in
+                                        prev_intersecting[out_key] = touching_out
+                                    else:
+                                        # Point movement crossing detection
+                                        crossed_A = is_crossing_line(prev_top, first_point, lp["in_line"])
+                                        crossed_B = is_crossing_line(prev_bottom, second_point, lp["out_line"])
 
                                     # SWAP_IN_OUT swaps which line triggers IN vs OUT
                                     # False (default): Cross B first, then A = IN | Cross A first, then B = OUT
@@ -987,13 +1148,13 @@ def main():
                                                 send_person_in_mqtt(original_frame, record_id, "person_out")
 
                                                 logging.info(
-                                                    f'Person {track_id} OUT through gate {gate_index} - Total OUT: {person_out}'
+                                                    f'Person {track_id} OUT through {gate_label} - Total OUT: {person_out}'
                                                 )
                                                 state_out[gate_key] = False
                                             else:
                                                 state_in[gate_key] = True
                                                 logging.info(
-                                                    f'Person {track_id} crossed IN line of gate {gate_index} (preparing for In)'
+                                                    f'Person {track_id} crossed IN line of {gate_label} (preparing for In)'
                                                 )
 
                                         elif crossed_B:
@@ -1011,13 +1172,13 @@ def main():
                                                 send_person_in_mqtt(original_frame, record_id, "person_in")
 
                                                 logging.info(
-                                                    f'Person {track_id} IN through gate {gate_index} - Total IN: {person_in}'
+                                                    f'Person {track_id} IN through {gate_label} - Total IN: {person_in}'
                                                 )
                                                 state_in[gate_key] = False
                                             else:
                                                 state_out[gate_key] = True
                                                 logging.info(
-                                                    f'Person {track_id} crossed OUT line of gate {gate_index} (preparing for Out)'
+                                                    f'Person {track_id} crossed OUT line of {gate_label} (preparing for Out)'
                                                 )
                                     else:
                                         # Default mode
@@ -1036,13 +1197,13 @@ def main():
                                                 send_person_in_mqtt(original_frame, record_id, "person_in")
 
                                                 logging.info(
-                                                    f'Person {track_id} IN through gate {gate_index} - Total IN: {person_in}'
+                                                    f'Person {track_id} IN through {gate_label} - Total IN: {person_in}'
                                                 )
                                                 state_in[gate_key] = False
                                             else:
                                                 state_out[gate_key] = True
                                                 logging.info(
-                                                    f'Person {track_id} crossed IN line of gate {gate_index} (preparing for Out)'
+                                                    f'Person {track_id} crossed IN line of {gate_label} (preparing for Out)'
                                                 )
 
                                         elif crossed_B:
@@ -1060,16 +1221,17 @@ def main():
                                                 send_person_in_mqtt(original_frame, record_id, "person_out")
 
                                                 logging.info(
-                                                    f'Person {track_id} OUT through gate {gate_index} - Total OUT: {person_out}'
+                                                    f'Person {track_id} OUT through {gate_label} - Total OUT: {person_out}'
                                                 )
                                                 state_out[gate_key] = False
                                             else:
                                                 state_in[gate_key] = True
                                                 logging.info(
-                                                    f'Person {track_id} crossed OUT line of gate {gate_index} (preparing for In)'
+                                                    f'Person {track_id} crossed OUT line of {gate_label} (preparing for In)'
                                                 )
 
-                            last_points[track_id] = (first_point, second_point)
+                            if DETECTION_STYLE != 'line':
+                                last_points[track_id] = (first_point, second_point)
                 
                 # Check for interval MQTT sending
                 if should_send_interval_mqtt():
@@ -1094,6 +1256,14 @@ def main():
                         logging.info("User requested exit")
                         return
 
+                # Processing FPS monitor
+                fps_counter += 1
+                if time.time() - fps_timer >= 10.0:
+                    actual_fps = fps_counter / (time.time() - fps_timer)
+                    logging.info(f"Processing FPS: {actual_fps:.1f}")
+                    fps_counter = 0
+                    fps_timer = time.time()
+
                 # Handle midnight reset
                 if should_reset() and not is_midnight:
                     reset_counts()
@@ -1106,8 +1276,9 @@ def main():
             logging.error(f"Error occurred: {str(error)}. Restarting in 5 seconds...")
             if 'cap' in locals():
                 cap.release()
-            cv2.destroyAllWindows()
+            safe_destroy_windows()
             last_points.clear()
+            prev_intersecting.clear()
             person_history.clear()
             time.sleep(5)
             continue
@@ -1115,7 +1286,7 @@ def main():
     # Cleanup
     if 'cap' in locals():
         cap.release()
-    cv2.destroyAllWindows()
+    safe_destroy_windows()
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
