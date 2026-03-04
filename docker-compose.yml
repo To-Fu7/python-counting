@@ -22,6 +22,52 @@ services:
           devices:
             - driver: nvidia
               count: all
+              capabilities: [gpu, video]
+
+  person-detector:
+    image: python-counting-services-python-1:latest
+    container_name: person-detector
+    restart: unless-stopped
+    command: python person_detector.py
+    env_file:
+      - .env_person_detector
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 512mb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+
+  ppe-detector:
+    image: python-counting-services-python-1:latest
+    container_name: ppe-detector
+    restart: unless-stopped
+    command: python ppe_detector.py
+    env_file:
+      - .env_ppe_detector
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 256mb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
               capabilities: [gpu]
 
 networks:

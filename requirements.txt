@@ -1,4 +1,4 @@
-# opencv-python-headless
+opencv-python-headless
 # opencv-python
 torch
 torchvision
@@ -7,7 +7,6 @@ numpy>=1.26.0
 lapx>=0.5.10.post1
 cvzone>=1.6.0
 pandas>=2.2.0
-shapely>=2.0.0
 psycopg2-binary
 datetime
 python-dotenv

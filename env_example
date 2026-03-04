@@ -29,7 +29,7 @@ POINT_AXIS= 'Y'
 
 # INCREMENTAL LINE
 lineA= [(240, 200), (240, 540)]
-lineB= [(245, 205), (245, 545)]
+# lineB= [(245, 205), (245, 545)]
 
 # SWAP IN/OUT DIRECTION
 # 'false' = Cross OUT line first, then IN line to count IN (default)
@@ -62,6 +62,18 @@ YOLO_CONFIDENCE = 0.5
 
 # DEBUG MODE
 DEBUG_MODE = 'true'
+# Send detection data to MQTT only (works even when DEBUG_MODE=true, skips DB)
+DEBUG_SENT_DATA = 'false'
+
+# ─── PERSON DETECTOR (person_detector.py) ───────────────────────────────────
+# Topic to publish new person detection events (cropped image + track_id)
+PERSON_DETECTION_TOPIC=/person_detection
+
+# ─── PPE DETECTOR (ppe_detector.py) ─────────────────────────────────────────
+# Topic to publish PPE compliance results
+PPE_DETECTION_TOPIC=/ppe_detection
+# Send interval per track_id in seconds — prevents burst on the same person
+# PPE_SEND_INTERVAL=2.0
 
 # RTMP/RTSP (Not Implemented Yet)
 # ENABLE_OUTPUT_STREAM= false
