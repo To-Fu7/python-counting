@@ -13,7 +13,10 @@ PG_PASS=''
 
 # VIDEO STREAM URL
 RTSP_URL='./1.mp4' # RTSP URL, mp4 video path, or 0 for videocam
-OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|stimeout;5000000|max_delay;5000000|rw_timeout;5000000|fflags;nobuffer|flags;low_delay|reorder_queue_size;0
+
+# Hardware Video Decoding (NVDEC) - Requires NVIDIA GPU with CUDA
+# Set to 'true' to enable GPU-accelerated H.264/HEVC decoding (reduces CPU usage ~40-60%)
+ENABLE_NVDEC = 'false'
 # 800 x 600
 # 1024 x 768
 # 1280 x 720
@@ -24,21 +27,70 @@ SCREEN_RESOLUTION= [800, 600]
 # "X" for point on the left and right line or "Y" for point on the up and bottom line
 POINT_AXIS= 'Y'
 
-# INCREMENTAL LINE
-lineA= [(240, 200), (240, 540)]
-lineB= [(245, 205), (245, 545)]
+# Detection style: 'dot' for center point detection, 'line' for full edge line detection
+DETECTION_STYLE = 'dot'
 
-# lineC= [(90, 270), (80, 630)]
-# lineD= [(95, 270), (85, 630)]
+# LINE CONFIGURATION
+# Define detection lines in alphabetical pairs: (A,B), (C,D), (E,F), ...
+# Only define the first line of each pair (lineA, lineC, lineE, ...).
+# The second line (lineB, lineD, lineF, ...) is auto-generated using LINE_OFFSET and OFFSET_AMOUNT.
+# Or define both lines explicitly if you want manual positioning.
+
+# LINE_OFFSET: Axis for auto-generating second line ('X' or 'Y')
+# LINE_OFFSET_AMOUNT: Pixels to offset the auto-generated line
+LINE_OFFSET = 'X'
+LINE_OFFSET_AMOUNT = 5
+
+# DOT_OFFSET: Axis for detection dot offset ('X' or 'Y')
+# DOT_OFFSET_AMOUNT: Pixels to push detection dots beyond bbox edges (0 = on bbox edge)
+DOT_OFFSET = 'Y'
+DOT_OFFSET_AMOUNT = 0
+
+# Gate 1 (lineB auto-generated from lineA + offset)
+lineA = [(240, 200), (240, 540)]
+
+# Gate 2 (uncomment to add; lineD auto-generated if omitted)
+# lineC = [(90, 270), (80, 630)]
+
+# MERGE_GATES: Unify all gates into one logical gate
+# 'true' = crossing ANY in_line then ANY out_line counts as one event
+# 'false' = each gate is isolated (default)
+MERGE_GATES = 'false'
+
+# SWAP IN/OUT DIRECTION
+# 'false' = Cross OUT line first, then IN line to count IN (default)
+# 'true' = Cross IN line first, then OUT line to count IN
+SWAP_IN_OUT = 'false'
+DETECTION_MARGIN = 60
 
 
 # MQTT
 MQTT_BROKER = 'localhost'
 MQTT_PORT = '1883'
-MQTT_USERNAME = '' 
+MQTT_USERNAME = ''
 MQTT_PASSWORD =  ''
 MQTT_TOPIC = '/person_in'
 MQTT_INTERVAL_TOPIC = '/resampling_person/****'
+
+# IMAGE QUALITY
+# JPEG quality for cropped person images sent via MQTT (1-100)
+# Lower = faster encoding, smaller payload, more compression artifacts
+# Default: 70 (good balance). Use 95 for high quality, 50 for minimal bandwidth.
+JPEG_QUALITY = 70
+
+# YOLO CONFIG
+# Model file (default: yolo11n.pt)
+# YOLO_MODEL = 'yolo11n.pt'
+# Confidence threshold (0.0-1.0) - higher = fewer false positives, may miss some detections
+YOLO_CONFIDENCE = 0.5
+# YOLO device: 'auto' (prefers GPU), 'cpu', '0' (first GPU), 'cuda:0'
+YOLO_DEVICE = 'auto'
+
+# PERFORMANCE
+# Max processing FPS (0 = no limit, 5-8 recommended for person counting)
+FPS_LIMIT = 8
+# Frame skip - process 1 out of every N frames (2 = every other frame)
+FRAME_SKIP = 2
 
 # DEBUG MODE
 DEBUG_MODE = 'true'
