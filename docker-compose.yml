@@ -1,121 +1,121 @@
 services:
-  # services-python-1:
-  #   # build:
-  #   #   context: .
-  #   #   dockerfile: Dockerfile
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-1
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_b1
-  #   volumes:
-  #     - .:/app
-  #   command: >
-  #     sh -c "pip install -q -r /app/requirements.txt && python /app/main.py"
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-1:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: python-mini-v4.3:latest
+    container_name: services-python-1
+    restart: unless-stopped
+    env_file:
+      - .env_b1
+    volumes:
+      - .:/app
+    command: >
+      sh -c "pip install -q -r /app/requirements.txt && python /app/main.py"
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
-  # services-python-2:
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-2
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_b2s
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-2:
+    image: python-mini-v4.3:latest
+    container_name: services-python-2
+    restart: unless-stopped
+    env_file:
+      - .env_b2s
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
-  # services-python-3:
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-3
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_b2u
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-3:
+    image: python-mini-v4.3:latest
+    container_name: services-python-3
+    restart: unless-stopped
+    env_file:
+      - .env_b2u
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
-  # services-python-4:
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-4
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_b3s
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-4:
+    image: python-mini-v4.3:latest
+    container_name: services-python-4
+    restart: unless-stopped
+    env_file:
+      - .env_b3s
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
-  # services-python-5:
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-5
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_b3u
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-5:
+    image: python-mini-v4.3:latest
+    container_name: services-python-5
+    restart: unless-stopped
+    env_file:
+      - .env_b3u
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
   services-python-6:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-6
     restart: unless-stopped
     env_file:
@@ -137,7 +137,7 @@ services:
               capabilities: [gpu, video]
 
   services-python-7:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-7
     restart: unless-stopped
     env_file:
@@ -159,7 +159,7 @@ services:
              capabilities: [gpu, video]
 
   services-python-8:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-8
     restart: unless-stopped
     env_file:
@@ -181,7 +181,7 @@ services:
               capabilities: [gpu, video]
 
   services-python-9:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-9
     restart: unless-stopped
     env_file:
@@ -203,7 +203,7 @@ services:
               capabilities: [gpu, video]
 
   services-python-10:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-10
     restart: unless-stopped
     env_file:
@@ -225,7 +225,7 @@ services:
               capabilities: [gpu, video]
 
   services-python-11:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-11
     restart: unless-stopped
     env_file:
@@ -247,7 +247,7 @@ services:
               capabilities: [gpu, video]
 
   services-python-12:
-    image: python-mini-v3:latest
+    image: python-mini-v4.3:latest
     container_name: services-python-12
     restart: unless-stopped
     env_file:
@@ -268,49 +268,49 @@ services:
               count: all
               capabilities: [gpu, video]
 
-  # services-python-13:
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-13
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_u38
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-13:
+    image: python-mini-v4.3:latest
+    container_name: services-python-13
+    restart: unless-stopped
+    env_file:
+      - .env_u38
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
-  # services-python-14:
-  #   image: python-mini-v3:latest
-  #   container_name: services-python-14
-  #   restart: unless-stopped
-  #   env_file:
-  #     - .env_u39
-  #   volumes:
-  #     - .:/app
-  #   runtime: nvidia
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - envisions
-  #   shm_size: 1gb
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu, video]
+  services-python-14:
+    image: python-mini-v4.3:latest
+    container_name: services-python-14
+    restart: unless-stopped
+    env_file:
+      - .env_u39
+    volumes:
+      - .:/app
+    runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - envisions
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
 networks:
   envisions:

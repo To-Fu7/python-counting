@@ -13,6 +13,7 @@ import psycopg2
 import time
 import logging
 from collections import defaultdict
+from shapely.geometry import LineString
 from zoneinfo import ZoneInfo
 import asyncio
 import base64
@@ -248,8 +249,9 @@ JPEG_QUALITY = int(os.getenv('JPEG_QUALITY', 70))  # Lower quality = faster enco
 
 # YOLO CONFIG
 YOLO_MODEL = os.getenv('YOLO_MODEL', 'yolo11n.pt')
-YOLO_CONFIDENCE = float(os.getenv('YOLO_CONFIDENCE', 0.3))  # Confidence threshold (0.0-1.0)
+YOLO_CONFIDENCE = float(os.getenv('YOLO_CONFIDENCE', 0.5))  # Confidence threshold (0.0-1.0)
 YOLO_DEVICE = os.getenv('YOLO_DEVICE', 'auto')  # Device: 'auto', 'cpu', '0', 'cuda:0'
+YOLO_IMGSZ = int(os.getenv('YOLO_IMGSZ', '640'))
 
 # PERFORMANCE
 FPS_LIMIT = float(os.getenv('FPS_LIMIT', '0'))  # 0 = no limit, >0 = max processing FPS
@@ -271,6 +273,38 @@ def resolve_yolo_device(device_str):
         return resolved
     logging.info(f"YOLO_DEVICE set to: {device_str}")
     return device_str
+
+def get_or_create_trt_engine(pt_model_path, imgsz=640, device='0'):
+    """Return path to TRT engine (cache hit or export from .pt)."""
+    base = os.path.splitext(pt_model_path)[0]
+    engine_path = f"{base}_imgsz{imgsz}_fp16_dynamic.engine"
+
+    if os.path.exists(engine_path):
+        logging.info(f"[TRT] Engine cache hit: {engine_path}")
+        return engine_path
+
+    logging.info(f"[TRT] Exporting {pt_model_path} → {engine_path} (one-time, 30–120s)...")
+    try:
+        from ultralytics import YOLO as _YOLO
+        _YOLO(pt_model_path).export(
+            format='engine', imgsz=imgsz, half=True,
+            device=device, simplify=True, verbose=False,
+            dynamic=True,
+        )
+    except Exception as e:
+        logging.error(f"[TRT] Export failed: {e}. Falling back to .pt")
+        return pt_model_path
+
+    default_engine = base + '.engine'
+    if os.path.exists(default_engine) and default_engine != engine_path:
+        os.rename(default_engine, engine_path)
+
+    if not os.path.exists(engine_path):
+        logging.error("[TRT] Engine not found after export. Falling back to .pt")
+        return pt_model_path
+
+    logging.info(f"[TRT] Engine ready: {engine_path}")
+    return engine_path
 
 # MQTT Client
 mqtt_client = None
@@ -380,33 +414,18 @@ def get_age_gender_data_from_db():
 def send_interval_mqtt_data():
     """Send interval data via MQTT (every 5 minutes and at 23:59)"""
     global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
-
+    
     if DEBUG_MODE:
         # logging.info("DEBUG_MODE: Skipping interval MQTT data send")
         return
-
+    
     if mqtt_client is None:
         logging.warning("MQTT client not initialized, skipping interval data")
         return
-
-    # Guard against rapid re-entry (multiple frames triggering in the same tick)
-    current_time = datetime.datetime.now(local_tz)
-    if last_mqtt_send is not None:
-        elapsed = (current_time - last_mqtt_send).total_seconds()
-        if elapsed < (MQTT_INTERVAL_MINUTES * 60) - 5:
-            logging.warning(f"Skipping duplicate interval send (only {elapsed:.0f}s since last)")
-            return
-
-    # Mark send time BEFORE publish to block any concurrent calls
-    last_mqtt_send = current_time
-
-    # Snapshot and reset counters atomically before publish
-    snapshot_in = interval_person_in
-    snapshot_out = interval_person_out
-    interval_person_in = 0
-    interval_person_out = 0
-
+    
     try:
+        current_time = datetime.datetime.now(local_tz)
+        
         # Create payload with current interval counts (not total)
         payload = {
             "record_id": record_id,
@@ -416,31 +435,30 @@ def send_interval_mqtt_data():
             "timestamp": current_time.isoformat(),
             "event": "interval_data",
             "data": {
-                "interval_in": snapshot_in,
-                "interval_out": snapshot_out,
+                "interval_in": interval_person_in,  # Current interval count
+                "interval_out": interval_person_out,  # Current interval count
                 "total_in": person_in,  # Keep total for reference
                 "total_out": person_out,  # Keep total for reference
                 "net_count": person_in - person_out,
-                "interval_net": snapshot_in - snapshot_out,
+                "interval_net": interval_person_in - interval_person_out,  # Net for this interval
                 "interval_minutes": MQTT_INTERVAL_MINUTES
             }
         }
-
+        
         # Send to MQTT
         result = mqtt_client.publish(MQTT_INTERVAL_TOPIC, json.dumps(payload), qos=1)
-
+        
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            logging.info(f"Interval data sent via MQTT - Interval IN: {snapshot_in}, Interval OUT: {snapshot_out}, Total IN: {person_in}, Total OUT: {person_out}")
+            logging.info(f"Interval data sent via MQTT - Interval IN: {interval_person_in}, Interval OUT: {interval_person_out}, Total IN: {person_in}, Total OUT: {person_out}")
+            last_mqtt_send = current_time
+            
+            # Reset interval counters after sending
+            interval_person_in = 0
+            interval_person_out = 0
         else:
-            # Restore counters on publish failure
-            interval_person_in += snapshot_in
-            interval_person_out += snapshot_out
             logging.error(f"Failed to send interval MQTT data, error code: {result.rc}")
-
+            
     except Exception as e:
-        # Restore counters on exception
-        interval_person_in += snapshot_in
-        interval_person_out += snapshot_out
         logging.error(f"Error sending interval MQTT data: {e}")
 
 
@@ -480,34 +498,25 @@ def is_in_detection_region(box):
     return not (y2 < DETECTION_Y_MIN or y1 > DETECTION_Y_MAX)
 
 def is_crossing_line(p1, p2, line):
-    """Check if segment p1-p2 crosses the given line using cross product"""
+    """Check if line segment p1-p2 crosses the given line"""
     if p1 is None or p2 is None:
         return False
     try:
-        a, b = line[0], line[1]
-        d1 = (b[0]-a[0])*(p1[1]-a[1]) - (b[1]-a[1])*(p1[0]-a[0])
-        d2 = (b[0]-a[0])*(p2[1]-a[1]) - (b[1]-a[1])*(p2[0]-a[0])
-        if d1 * d2 >= 0:
-            return False
-        d3 = (p2[0]-p1[0])*(a[1]-p1[1]) - (p2[1]-p1[1])*(a[0]-p1[0])
-        d4 = (p2[0]-p1[0])*(b[1]-p1[1]) - (p2[1]-p1[1])*(b[0]-p1[0])
-        return d3 * d4 < 0
-    except Exception:
+        person_line = LineString([p1, p2])
+        the_line = LineString(line)
+        return person_line.crosses(the_line)
+    except Exception as e:
+        logging.warning(f"Error checking line crossing: {e}")
         return False
 
 def is_edge_intersecting(edge_start, edge_end, detection_line):
-    """Check if bbox edge segment intersects with the detection line using cross product"""
+    """Check if a bbox edge line segment intersects with the detection line"""
     try:
-        p1, p2 = edge_start, edge_end
-        a, b = detection_line[0], detection_line[1]
-        d1 = (b[0]-a[0])*(p1[1]-a[1]) - (b[1]-a[1])*(p1[0]-a[0])
-        d2 = (b[0]-a[0])*(p2[1]-a[1]) - (b[1]-a[1])*(p2[0]-a[0])
-        if d1 * d2 > 0:
-            return False
-        d3 = (p2[0]-p1[0])*(a[1]-p1[1]) - (p2[1]-p1[1])*(a[0]-p1[0])
-        d4 = (p2[0]-p1[0])*(b[1]-p1[1]) - (p2[1]-p1[1])*(b[0]-p1[0])
-        return d3 * d4 <= 0
-    except Exception:
+        edge = LineString([edge_start, edge_end])
+        det_line = LineString(detection_line)
+        return edge.intersects(det_line)
+    except Exception as e:
+        logging.warning(f"Error checking edge intersection: {e}")
         return False
 
 def validate_cctv_connection(rtsp_url, timeout=5):
@@ -519,7 +528,7 @@ def validate_cctv_connection(rtsp_url, timeout=5):
     try:
         logging.info(f"Validating CCTV connection: {rtsp_url}")
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         if not cap.isOpened():
             logging.warning("CCTV stream failed to open")
@@ -541,12 +550,6 @@ def validate_cctv_connection(rtsp_url, timeout=5):
         logging.warning(f"CCTV validation error: {e}")
         return False
 
-def safe_destroy_windows():
-    try:
-        cv2.destroyAllWindows()
-    except cv2.error:
-        pass
-
 def initialize_video_capture(video_source):
     """Initialize video capture with the given video source (RTSP URL or file path)"""
     logging.info(f'Initializing video capture with source: {video_source}')
@@ -559,7 +562,7 @@ def initialize_video_capture(video_source):
         logging.info('NVDEC hardware decoding enabled (h264_cuvid)')
 
     cap = cv2.VideoCapture(video_source, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FPS, 10)
     return cap
 
@@ -920,9 +923,26 @@ def main():
         logging.error(f"Fatal error: {e}")
         return
     
-    model = YOLO(YOLO_MODEL)
     resolved_device = resolve_yolo_device(YOLO_DEVICE)
+
+    if resolved_device != 'cpu' and YOLO_MODEL.endswith('.pt'):
+        model_path = get_or_create_trt_engine(YOLO_MODEL, imgsz=YOLO_IMGSZ, device=resolved_device)
+    else:
+        model_path = YOLO_MODEL
+
+    try:
+        model = YOLO(model_path)
+    except Exception as e:
+        if model_path.endswith('.engine'):
+            logging.error(f"[TRT] Failed to load engine: {e}. Deleting and retrying with .pt")
+            os.remove(model_path)
+            model = YOLO(YOLO_MODEL)
+            model_path = YOLO_MODEL
+        else:
+            raise
+
     names = model.names
+    logging.info(f"Model loaded: {model_path}")
 
     last_waiting_log = time.time()
     
@@ -950,11 +970,10 @@ def main():
             fps_counter = 0
             fps_timer = time.time()
             while True:
+                ret, frame = cap.read()
                 count += 1
                 if count % FRAME_SKIP != 0:
-                    cap.grab()  # Advance buffer without decoding
                     continue
-                ret, frame = cap.read()
 
                 # FPS limiting
                 if FRAME_INTERVAL > 0:
@@ -979,14 +998,9 @@ def main():
                 
                 # Run YOLO only on the detection region with confidence threshold
                 results = model.track(
-                    detection_frame,
-                    persist=True,
-                    verbose=False,
-                    conf=YOLO_CONFIDENCE,
-                    device=resolved_device,
-                    classes=[0],
-                    iou=0.3,
-                    imgsz=1280,
+                    detection_frame, persist=True, verbose=False,
+                    conf=YOLO_CONFIDENCE, device=resolved_device,
+                    classes=[0], iou=0.3, imgsz=YOLO_IMGSZ, half=True,
                     tracker="bytetrack.yaml")
 
                 # Draw all IN/OUT lines (only in DEBUG_MODE)
@@ -1089,10 +1103,10 @@ def main():
                                     first_edge = ((x1, y1), (x1, y2))
                                     second_edge = ((x2, y1), (x2, y2))
                             else:
-                                if POINT_AXIS == "Y":
+                                if DOT_OFFSET == "Y":
                                     first_point = ((x1 + x2) // 2, y1 - DOT_OFFSET_AMOUNT)
                                     second_point = ((x1 + x2) // 2, y2 + DOT_OFFSET_AMOUNT)
-                                elif POINT_AXIS == "X":
+                                elif DOT_OFFSET == "X":
                                     first_point = (x1 - DOT_OFFSET_AMOUNT, (y1 + y2) // 2)
                                     second_point = (x2 + DOT_OFFSET_AMOUNT, (y1 + y2) // 2)
 
@@ -1285,7 +1299,7 @@ def main():
             logging.error(f"Error occurred: {str(error)}. Restarting in 5 seconds...")
             if 'cap' in locals():
                 cap.release()
-            safe_destroy_windows()
+            cv2.destroyAllWindows()
             last_points.clear()
             prev_intersecting.clear()
             person_history.clear()
@@ -1295,7 +1309,7 @@ def main():
     # Cleanup
     if 'cap' in locals():
         cap.release()
-    safe_destroy_windows()
+    cv2.destroyAllWindows()
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
