@@ -55,6 +55,12 @@ person_woman = 0
 last_mqtt_send = None
 last_daily_send = None
 
+resample_hour_in = 0
+resample_hour_out = 0
+resample_record_id = None
+current_tracking_hour = None
+last_hour_send = None
+
 # Store latest person coordinates for MQTT
 latest_person_coordinates = []
 
@@ -413,7 +419,7 @@ def get_age_gender_data_from_db():
     
 def send_interval_mqtt_data():
     """Send interval data via MQTT (every 5 minutes and at 23:59)"""
-    global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
+    global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out, resample_hour_in, resample_hour_out, resample_record_id
     
     if DEBUG_MODE:
         # logging.info("DEBUG_MODE: Skipping interval MQTT data send")
@@ -451,15 +457,84 @@ def send_interval_mqtt_data():
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             logging.info(f"Interval data sent via MQTT - Interval IN: {interval_person_in}, Interval OUT: {interval_person_out}, Total IN: {person_in}, Total OUT: {person_out}")
             last_mqtt_send = current_time
-            
+
             # Reset interval counters after sending
             interval_person_in = 0
             interval_person_out = 0
+
+            # Persist accumulated hour counts to DB
+            if resample_record_id is not None:
+                db_queue_write(
+                    "UPDATE inout_resample SET interval_in = %s, interval_out = %s, updated_at = now() WHERE id = %s",
+                    (resample_hour_in, resample_hour_out, resample_record_id)
+                )
         else:
             logging.error(f"Failed to send interval MQTT data, error code: {result.rc}")
             
     except Exception as e:
         logging.error(f"Error sending interval MQTT data: {e}")
+
+
+def init_resample_record():
+    """Create or restore the inout_resample row for the current hour."""
+    global resample_record_id, resample_hour_in, resample_hour_out, current_tracking_hour
+    current_time = datetime.datetime.now(local_tz)
+    hour_slot = current_time.replace(minute=0, second=0, microsecond=0)
+    current_tracking_hour = hour_slot
+
+    if DEBUG_MODE:
+        resample_record_id = None
+        resample_hour_in = 0
+        resample_hour_out = 0
+        logging.info(f"DEBUG_MODE: Skipping inout_resample init for {hour_slot}")
+        return
+
+    row = db_query(
+        "SELECT id, interval_in, interval_out FROM inout_resample WHERE device_id = %s AND hour_start = %s",
+        (device_id, hour_slot)
+    )
+    if row:
+        resample_record_id = row[0]['id']
+        resample_hour_in = row[0]['interval_in']
+        resample_hour_out = row[0]['interval_out']
+        logging.info(f"Restored resample record for {hour_slot}: IN={resample_hour_in}, OUT={resample_hour_out}")
+    else:
+        result = db_query(
+            "INSERT INTO inout_resample (device_id, interval_in, interval_out, hour_start) VALUES (%s, %s, %s, %s) RETURNING id",
+            (device_id, 0, 0, hour_slot), commit=True
+        )
+        if result:
+            resample_record_id = result[0]['id']
+            resample_hour_in = 0
+            resample_hour_out = 0
+            logging.info(f"Created resample record for {hour_slot}")
+        else:
+            logging.error(f"Failed to create resample record for {hour_slot}")
+
+
+def should_send_on_hour_change():
+    """Return True when the system clock has crossed into a new hour."""
+    if current_tracking_hour is None:
+        return False
+    current_time = datetime.datetime.now(local_tz)
+    return (current_time.hour != current_tracking_hour.hour or
+            current_time.date() != current_tracking_hour.date())
+
+
+def handle_hour_change():
+    """Force-send resample data for the completed hour, then start a new hour row."""
+    global resample_hour_in, resample_hour_out, resample_record_id, current_tracking_hour, last_hour_send, last_mqtt_send
+
+    logging.info("Hour boundary reached — force sending resample data")
+    send_interval_mqtt_data()
+
+    last_hour_send = datetime.datetime.now(local_tz)
+    resample_hour_in = 0
+    resample_hour_out = 0
+    init_resample_record()
+
+    # Reset 5-minute timer so the next regular send starts from now
+    last_mqtt_send = datetime.datetime.now(local_tz)
 
 
 def should_send_interval_mqtt():
@@ -766,12 +841,12 @@ def get_latest_counts(device_id):
 
 def initialize_counts():
     """Initialize counters from database or create new record"""
-    global person_in, person_out, record_id, class_counts, interval_person_in, interval_person_out
-    
+    global person_in, person_out, record_id, class_counts, interval_person_in, interval_person_out, resample_hour_in, resample_hour_out, resample_record_id, current_tracking_hour
+
     # Initialize interval counters
     interval_person_in = 0
     interval_person_out = 0
-    
+
     if DEBUG_MODE:
         # Skip DB validation in debug mode
         new_id = str(uuid.uuid4())
@@ -781,8 +856,9 @@ def initialize_counts():
         person_in = 0
         person_out = 0
         logging.info(f"DEBUG_MODE: Skipping DB validation, initialized with new record id {new_id}")
+        init_resample_record()
         return {"id": new_id}
-    
+
     # FIX: unpack four values (restored_counts, last_date_local, last_data_id, extra_data)
     restored_counts, last_date_local, last_data_id, extra_data = get_latest_counts(device_id)
 
@@ -792,6 +868,7 @@ def initialize_counts():
         person_out = class_counts['out']
         record_id = last_data_id['id']
         logging.info(f"Restored counts from DB ({last_date_local}): IN={person_in}, OUT={person_out}")
+        init_resample_record()
         return last_data_id
     else:
         new_id = str(uuid.uuid4())
@@ -804,6 +881,7 @@ def initialize_counts():
             person_in = 0
             person_out = 0
             logging.info(f"No valid counts to restore, created new record with id {new_id}")
+            init_resample_record()
             return {"id": new_id}
         else:
             logging.error("Failed to create new row")
@@ -811,13 +889,14 @@ def initialize_counts():
 
 def reset_counts():
     """Reset counts at midnight"""
-    global class_counts, state_in, state_out, prev_intersecting, person_history, record_id, person_in, person_out, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
-    
+    global class_counts, state_in, state_out, prev_intersecting, person_history, record_id, person_in, person_out, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out, resample_hour_in, resample_hour_out, resample_record_id, current_tracking_hour
+
     # Send final daily report before reset
     send_interval_mqtt_data()
-    
+
     person_in, person_out = 0, 0
-    interval_person_in, interval_person_out = 0, 0  # Reset interval counters too
+    interval_person_in, interval_person_out = 0, 0
+    resample_hour_in, resample_hour_out = 0, 0
     class_counts.clear()
     class_counts['in'] = 0
     class_counts['out'] = 0
@@ -825,21 +904,22 @@ def reset_counts():
     state_out.clear()
     prev_intersecting.clear()
     person_history.clear()
-    
+
     new_id = str(uuid.uuid4())
-    
+
     if DEBUG_MODE:
         record_id = new_id
         last_mqtt_send = None
         logging.info("== Midnight Reached: Totals Reset (DEBUG_MODE: Skipping DB operation) ==")
+        init_resample_record()
     else:
         success = db_query("INSERT INTO person_inout (id, device_id, total_in, total_out) VALUES (%s, %s, %s, %s)",
-                        (new_id, device_id, 0, 0), commit=True)   
+                        (new_id, device_id, 0, 0), commit=True)
         if success:
             record_id = new_id
-            # Reset MQTT timers
             last_mqtt_send = None
             logging.info("== Midnight Reached: Totals Reset ==")
+            init_resample_record()
         else:
             logging.error("Error creating new record at midnight")
 
@@ -890,7 +970,7 @@ def RGB(event, x, y, flags, param):
 
 def main():
     """Main function"""
-    global person_in, person_out, is_midnight, record_id, latest_person_coordinates, interval_person_in, interval_person_out, db_thread_running
+    global person_in, person_out, is_midnight, record_id, latest_person_coordinates, interval_person_in, interval_person_out, resample_hour_in, resample_hour_out, db_thread_running
 
     # Start async database worker thread
     if not DEBUG_MODE:
@@ -1160,6 +1240,7 @@ def main():
                                             if state_out.get(gate_key):
                                                 person_out += 1
                                                 interval_person_out += 1
+                                                resample_hour_out += 1
                                                 class_counts['out'] = person_out
 
                                                 # Async DB update (non-blocking)
@@ -1184,6 +1265,7 @@ def main():
                                             if state_in.get(gate_key):
                                                 person_in += 1
                                                 interval_person_in += 1
+                                                resample_hour_in += 1
                                                 class_counts['in'] = person_in
 
                                                 # Async DB update (non-blocking)
@@ -1209,6 +1291,7 @@ def main():
                                             if state_in.get(gate_key):
                                                 person_in += 1
                                                 interval_person_in += 1
+                                                resample_hour_in += 1
                                                 class_counts['in'] = person_in
 
                                                 # Async DB update (non-blocking)
@@ -1233,6 +1316,7 @@ def main():
                                             if state_out.get(gate_key):
                                                 person_out += 1
                                                 interval_person_out += 1
+                                                resample_hour_out += 1
                                                 class_counts['out'] = person_out
 
                                                 # Async DB update (non-blocking)
@@ -1256,8 +1340,10 @@ def main():
                             if DETECTION_STYLE != 'line':
                                 last_points[track_id] = (first_point, second_point)
                 
-                # Check for interval MQTT sending
-                if should_send_interval_mqtt():
+                # Check for interval MQTT sending (hour change takes priority)
+                if should_send_on_hour_change():
+                    handle_hour_change()
+                elif should_send_interval_mqtt():
                     send_interval_mqtt_data()
                 
                 if not person_detected:
